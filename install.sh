@@ -94,9 +94,10 @@ INSTALL_FILES=(
 )
 
 
-BIN_FILES="oneswap sesparse"
+BIN_FILES="oneswap oneswap-hyperv sesparse"
 ONE_CLI_LIB_FILES="esxi_client.rb \
                    esxi_vm.rb \
+                   hyperv_helper.rb \
                    netapp_shift_helper.rb \
                    oneswap_helper.rb \
                    oneswap_logger.rb \
