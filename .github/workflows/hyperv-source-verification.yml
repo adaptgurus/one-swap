@@ -1,0 +1,43 @@
+name: Hyper-V Source Verification
+
+on:
+  pull_request:
+    paths:
+      - 'hyperv_helper.rb'
+      - 'oneswap-hyperv'
+      - 'install.sh'
+      - 'docs/HYPERV.md'
+      - 'tests/hyperv_helper_test.rb'
+      - '.github/workflows/hyperv-source-verification.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  hyperv-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Ruby syntax
+        run: |
+          set -euo pipefail
+          ruby -c hyperv_helper.rb
+          ruby -c oneswap-hyperv
+      - name: Focused Hyper-V tests
+        run: |
+          set -euo pipefail
+          ruby -I. tests/hyperv_helper_test.rb
+      - name: Installer syntax
+        run: bash -n install.sh
+      - name: Security invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "StrictHostKeyChecking=yes" hyperv_helper.rb
+          grep -q "PasswordAuthentication=no" hyperv_helper.rb
+          ! grep -Eq -- '--hyperv-pass(word)?' oneswap-hyperv
+          grep -q "SHA-256 mismatch" hyperv_helper.rb
+          grep -q "source VM must be Off" hyperv_helper.rb

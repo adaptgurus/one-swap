@@ -94,9 +94,10 @@ INSTALL_FILES=(
 )
 
 
-BIN_FILES="oneswap sesparse"
+BIN_FILES="oneswap oneswap-hyperv sesparse"
 ONE_CLI_LIB_FILES="esxi_client.rb \
                    esxi_vm.rb \
+                   hyperv_helper.rb \
                    netapp_shift_helper.rb \
                    oneswap_helper.rb \
                    oneswap_logger.rb \
@@ -149,3 +150,7 @@ for i in ${INSTALL_SET[@]}; do
         do_file $f $DST
     done
 done
+
+# Files created through downstream source-delivery APIs may not retain the
+# executable bit. Enforce it on installed command entrypoints.
+chmod +x "$DESTDIR$BIN_LOCATION/oneswap" "$DESTDIR$BIN_LOCATION/oneswap-hyperv" "$DESTDIR$BIN_LOCATION/sesparse"

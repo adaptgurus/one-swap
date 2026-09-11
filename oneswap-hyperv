@@ -1,0 +1,150 @@
+#!/usr/bin/env ruby
+
+ONE_LOCATION = ENV['ONE_LOCATION']
+
+if ONE_LOCATION
+    RUBY_LIB_LOCATION = File.join(ONE_LOCATION, 'lib', 'ruby')
+    GEMS_LOCATION = File.join(ONE_LOCATION, 'share', 'gems')
+else
+    RUBY_LIB_LOCATION = '/usr/lib/one/ruby'
+    GEMS_LOCATION = '/usr/share/one/gems'
+end
+
+if File.directory?(GEMS_LOCATION)
+    begin
+        require 'rubygems'
+        Gem.use_paths(File.realpath(GEMS_LOCATION))
+    rescue StandardError
+        # Preserve the same fail-later behavior as the primary OneSwap CLI.
+    end
+end
+
+$LOAD_PATH << RUBY_LIB_LOCATION
+$LOAD_PATH << File.join(RUBY_LIB_LOCATION, 'cli')
+
+require 'json'
+require 'opennebula'
+require 'optparse'
+require 'yaml'
+require 'one_helper/oneswap_helper'
+require 'one_helper/hyperv_helper'
+
+options = {
+    :config_file => '/etc/one/oneswap.yaml'
+}
+
+parser = OptionParser.new do |opts|
+    opts.banner = 'Usage: oneswap-hyperv VM_NAME [options]'
+    opts.separator ''
+    opts.separator 'Hyper-V source (SSH public-key authentication only):'
+    opts.on('--hyperv-connection ID', String, 'Server-side connection profile from oneswap.yaml') { |v| options[:hyperv_connection] = v }
+    opts.on('--hyperv-host HOST', String, 'Direct Hyper-V host (standalone/admin use)') { |v| options[:hyperv_host] = v }
+    opts.on('--hyperv-user USER', String, 'Hyper-V SSH user (default Administrator)') { |v| options[:hyperv_user] = v }
+    opts.on('--hyperv-port PORT', Integer, 'Hyper-V SSH port (default 22)') { |v| options[:hyperv_port] = v }
+    opts.on('--hyperv-identity PATH', String, 'SSH private-key path; file contents are never accepted on argv') { |v| options[:hyperv_identity] = v }
+    opts.on('--hyperv-known-hosts PATH', String, 'Pinned known_hosts file; strict host checking is mandatory') { |v| options[:hyperv_known_hosts] = v }
+    opts.on('--hyperv-transfer-timeout SECONDS', Integer, 'Per-disk transfer timeout; 0 means no explicit timeout') { |v| options[:hyperv_transfer_timeout] = v }
+
+    opts.separator ''
+    opts.separator 'OpenNebula target:'
+    opts.on('--datastore IDS', String, 'Image datastore ID or comma-separated per-disk IDs (required)') { |v| options[:datastore] = v }
+    opts.on('--network IDS', String, 'OpenNebula VNet ID or comma-separated per-NIC IDs') { |v| options[:network] = v }
+    opts.on('--one-cluster ID', Integer) { |v| options[:one_cluster] = v }
+    opts.on('--one-host ID', Integer) { |v| options[:one_host] = v }
+    opts.on('--one-sys-ds ID', Integer) { |v| options[:one_datastore] = v }
+    opts.on('--one-ds-cluster ID', Integer) { |v| options[:one_datastore_cluster] = v }
+    opts.on('--one-user USER', String) { |v| options[:one_user] = v }
+    opts.on('--one-group GROUP', String) { |v| options[:one_group] = v }
+    opts.on('--persistent-img', 'Create persistent OpenNebula images') { options[:persistent_img] = true }
+    opts.on('--skip-mac', 'Do not preserve Hyper-V NIC MAC addresses') { options[:skip_mac] = true }
+
+    opts.separator ''
+    opts.separator 'Conversion:'
+    opts.on('-w', '--work-dir PATH', String) { |v| options[:work_dir] = v }
+    opts.on('-f', '--format FORMAT', String, 'qcow2 or raw') { |v| options[:format] = v }
+    opts.on('--v2v-path PATH', String) { |v| options[:v2v_path] = v }
+    opts.on('--libguestfs-path PATH', String) { |v| options[:libguestfs_path] = v }
+    opts.on('--root ROOT', String) { |v| options[:root] = v }
+    opts.on('--virtio PATH', String, 'virtio-win ISO/path used by existing OneSwap guest injection') { |v| options[:virtio_path] = v }
+    opts.on('--win-qemu-ga PATH', String) { |v| options[:qemu_ga_win] = v }
+    opts.on('--qemu-ga', 'Install qemu-guest-agent in Linux') { options[:qemu_ga_linux] = true }
+    opts.on('--context-package PATH', String) { |v| options[:context] = v }
+    opts.on('--skip-context', 'Skip OpenNebula contextualization package injection') { options[:skip_context] = true }
+    opts.on('--context-min-free MB', Integer) { |v| options[:context_min_free] = v }
+    opts.on('--context-timeout SECONDS', Integer) { |v| options[:context_timeout] = v }
+    opts.on('--virt-tools PATH', String) { |v| options[:virt_tools] = v }
+    opts.on('--dev-prefix PREFIX', String) { |v| options[:dev_prefix] = v }
+    opts.on('--cpu-model MODEL', String) { |v| options[:cpu_model] = v }
+    opts.on('--cpu CPU', Integer) { |v| options[:cpu] = v }
+    opts.on('--vcpu VCPU', Integer) { |v| options[:vcpu] = v }
+    opts.on('--graphics-type TYPE', String) { |v| options[:graphics_type] = v }
+    opts.on('--graphics-listen IP', String) { |v| options[:graphics_listen] = v }
+    opts.on('--disable-contextualization') { options[:disable_contextualization] = true }
+    opts.on('--uefi-path PATH', String) { |v| options[:uefi_path] = v }
+    opts.on('--uefi-sec-path PATH', String) { |v| options[:uefi_sec_path] = v }
+    opts.on('--img-wait SECONDS', Integer) { |v| options[:img_wait] = v }
+    opts.on('--delete-after', 'Delete local conversion workspace after successful import') { options[:delete] = true }
+
+    opts.separator ''
+    opts.separator 'Remote OpenNebula image transfer:'
+    opts.on('--http-transfer') { options[:http_transfer] = true }
+    opts.on('--http-host HOST', String) { |v| options[:http_host] = v }
+    opts.on('--http-port PORT', Integer) { |v| options[:http_port] = v }
+    opts.on('--allow-local-path-remote') { options[:allow_local_path_remote] = true }
+
+    opts.separator ''
+    opts.on('--config-file PATH', String) { |v| options[:config_file] = v }
+    opts.on('-v', '--verbose') { options[:verbose] = true }
+    opts.on('-h', '--help') do
+        puts opts
+        exit 0
+    end
+end
+
+begin
+    parser.parse!(ARGV)
+    vm_name = ARGV.shift
+    raise OptionParser::MissingArgument, 'VM_NAME' if vm_name.to_s.strip.empty?
+    raise OptionParser::InvalidArgument, "unexpected extra arguments: #{ARGV.join(' ')}" unless ARGV.empty?
+
+    config_file = options[:config_file]
+    if config_file && File.exist?(config_file)
+        loaded = YAML.load_file(config_file) || {}
+        normalized = {}
+        loaded.each do |key, value|
+            normalized[key.to_s.sub(/^:/, '').to_sym] = value
+        end
+        options = normalized.merge(options)
+    elsif config_file && config_file != '/etc/one/oneswap.yaml'
+        raise "OneSwap config file not found: #{config_file}"
+    end
+
+    if options[:hyperv_connection].to_s.strip.empty? && options[:hyperv_host].to_s.strip.empty?
+        raise 'provide --hyperv-connection ID (recommended) or direct --hyperv-host/--hyperv-identity/--hyperv-known-hosts options'
+    end
+
+    validate_ids = lambda do |value, label, required|
+        parts = value.to_s.split(',').map(&:strip).reject(&:empty?)
+        raise "#{label} is required" if required && parts.empty?
+        parts.each do |part|
+            raise "invalid #{label} ID #{part.inspect}" unless part.match?(/\A\d+\z/)
+        end
+        parts
+    end
+    validate_ids.call(options[:datastore], 'OpenNebula image datastore', true)
+    validate_ids.call(options[:network], 'OpenNebula network', false)
+
+    options[:http_port] ||= 29_869
+
+    helper = OneSwapHelper.new
+    helper.instance_variable_set(:@client, OpenNebula::Client.new)
+    template_id = helper.hyperv_convert(vm_name, options)
+    puts JSON.generate({ :status => 'imported', :source_platform => 'hyperv', :vm_name => vm_name, :template_id => template_id })
+rescue OptionParser::ParseError => e
+    warn e.message
+    warn parser
+    exit 2
+rescue ConversionError, OneSwapHyperV::Error, StandardError => e
+    warn "Hyper-V migration failed: #{e.message}"
+    exit 1
+end
