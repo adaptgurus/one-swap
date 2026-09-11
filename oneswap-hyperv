@@ -28,13 +28,22 @@ require 'optparse'
 require 'yaml'
 require 'one_helper/oneswap_helper'
 require 'one_helper/hyperv_helper'
+require 'one_helper/hyperv_hot_helper'
 
-options = {
-    :config_file => '/etc/one/oneswap.yaml'
-}
+options = { :config_file => '/etc/one/oneswap.yaml' }
 
 parser = OptionParser.new do |opts|
     opts.banner = 'Usage: oneswap-hyperv VM_NAME [options]'
+    opts.separator ''
+    opts.separator 'Migration mode:'
+    opts.on('--hot', 'Warm/hot pre-copy using Hyper-V RCT with final source shutdown') { options[:hot] = true }
+    opts.on('--preflight', 'Validate hot migration without creating a reference point') { options[:preflight] = true }
+    opts.on('--prepare', 'Create/export RCT reference point and build prepared RAW target disks') { options[:prepare] = true }
+    opts.on('--commit', 'Revalidate, gracefully stop source VM, apply final RCT delta and import target') { options[:commit] = true }
+    opts.on('--cleanup', 'Remove prepared RCT/staging state before cutover') { options[:cleanup] = true }
+    opts.on('--finalize-success', 'Cleanup RCT/staging after LayerSentry independently validates target success') { options[:finalize_success] = true }
+    opts.on('--operation-id ID', String, 'Durable LayerSentry operation ID required for hot phases') { |v| options[:operation_id] = v }
+
     opts.separator ''
     opts.separator 'Hyper-V source (SSH public-key authentication only):'
     opts.on('--hyperv-connection ID', String, 'Server-side connection profile from oneswap.yaml') { |v| options[:hyperv_connection] = v }
@@ -43,7 +52,11 @@ parser = OptionParser.new do |opts|
     opts.on('--hyperv-port PORT', Integer, 'Hyper-V SSH port (default 22)') { |v| options[:hyperv_port] = v }
     opts.on('--hyperv-identity PATH', String, 'SSH private-key path; file contents are never accepted on argv') { |v| options[:hyperv_identity] = v }
     opts.on('--hyperv-known-hosts PATH', String, 'Pinned known_hosts file; strict host checking is mandatory') { |v| options[:hyperv_known_hosts] = v }
-    opts.on('--hyperv-transfer-timeout SECONDS', Integer, 'Per-disk transfer timeout; 0 means no explicit timeout') { |v| options[:hyperv_transfer_timeout] = v }
+    opts.on('--hyperv-staging-dir PATH', String, 'Existing source-host directory for RCT reference exports/delta bundles') { |v| options[:hyperv_staging_dir] = v }
+    opts.on('--hyperv-transfer-timeout SECONDS', Integer, 'Per-transfer timeout; 0 means no explicit timeout') { |v| options[:hyperv_transfer_timeout] = v }
+    opts.on('--hyperv-prepare-timeout SECONDS', Integer, 'Reference-point export timeout') { |v| options[:hyperv_prepare_timeout] = v }
+    opts.on('--hyperv-delta-timeout SECONDS', Integer, 'Final RCT delta generation timeout') { |v| options[:hyperv_delta_timeout] = v }
+    opts.on('--shutdown-timeout SECONDS', Integer, 'Graceful source shutdown timeout; no forced power-off fallback') { |v| options[:shutdown_timeout] = v }
 
     opts.separator ''
     opts.separator 'OpenNebula target:'
@@ -61,8 +74,9 @@ parser = OptionParser.new do |opts|
     opts.separator ''
     opts.separator 'Conversion:'
     opts.on('-w', '--work-dir PATH', String) { |v| options[:work_dir] = v }
-    opts.on('-f', '--format FORMAT', String, 'qcow2 or raw') { |v| options[:format] = v }
+    opts.on('-f', '--format FORMAT', String, 'qcow2 or raw; hot mode requires raw') { |v| options[:format] = v }
     opts.on('--v2v-path PATH', String) { |v| options[:v2v_path] = v }
+    opts.on('--v2v-in-place-path PATH', String) { |v| options[:v2v_in_place_path] = v }
     opts.on('--libguestfs-path PATH', String) { |v| options[:libguestfs_path] = v }
     opts.on('--root ROOT', String) { |v| options[:root] = v }
     opts.on('--virtio PATH', String, 'virtio-win ISO/path used by existing OneSwap guest injection') { |v| options[:virtio_path] = v }
@@ -95,10 +109,7 @@ parser = OptionParser.new do |opts|
     opts.separator ''
     opts.on('--config-file PATH', String) { |v| options[:config_file] = v }
     opts.on('-v', '--verbose') { options[:verbose] = true }
-    opts.on('-h', '--help') do
-        puts opts
-        exit 0
-    end
+    opts.on('-h', '--help') { puts opts; exit 0 }
 end
 
 begin
@@ -111,9 +122,7 @@ begin
     if config_file && File.exist?(config_file)
         loaded = YAML.load_file(config_file) || {}
         normalized = {}
-        loaded.each do |key, value|
-            normalized[key.to_s.sub(/^:/, '').to_sym] = value
-        end
+        loaded.each { |key, value| normalized[key.to_s.sub(/^:/, '').to_sym] = value }
         options = normalized.merge(options)
     elsif config_file && config_file != '/etc/one/oneswap.yaml'
         raise "OneSwap config file not found: #{config_file}"
@@ -126,20 +135,35 @@ begin
     validate_ids = lambda do |value, label, required|
         parts = value.to_s.split(',').map(&:strip).reject(&:empty?)
         raise "#{label} is required" if required && parts.empty?
-        parts.each do |part|
-            raise "invalid #{label} ID #{part.inspect}" unless part.match?(/\A\d+\z/)
-        end
+        parts.each { |part| raise "invalid #{label} ID #{part.inspect}" unless part.match?(/\A\d+\z/) }
         parts
     end
     validate_ids.call(options[:datastore], 'OpenNebula image datastore', true)
     validate_ids.call(options[:network], 'OpenNebula network', false)
-
     options[:http_port] ||= 29_869
 
     helper = OneSwapHelper.new
     helper.instance_variable_set(:@client, OpenNebula::Client.new)
-    template_id = helper.hyperv_convert(vm_name, options)
-    puts JSON.generate({ :status => 'imported', :source_platform => 'hyperv', :vm_name => vm_name, :template_id => template_id })
+
+    if options[:hot]
+        phases = %i[preflight prepare commit cleanup finalize_success].select { |name| options[name] }
+        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --cleanup or --finalize-success' unless phases.length == 1
+        raise 'hot migration requires --operation-id' if options[:operation_id].to_s.strip.empty?
+        result = case phases.first
+                 when :preflight then helper.hyperv_hot_preflight(vm_name, options)
+                 when :prepare then helper.hyperv_hot_prepare(vm_name, options)
+                 when :commit then helper.hyperv_hot_commit(vm_name, options)
+                 when :cleanup then helper.hyperv_hot_cleanup(vm_name, options)
+                 when :finalize_success then helper.hyperv_hot_finalize_success(vm_name, options)
+                 end
+        puts JSON.generate(result.merge('source_platform' => 'hyperv', 'vm_name' => vm_name))
+    else
+        if %i[preflight prepare commit cleanup finalize_success].any? { |name| options[name] }
+            raise '--preflight/--prepare/--commit/--cleanup/--finalize-success require --hot'
+        end
+        template_id = helper.hyperv_convert(vm_name, options)
+        puts JSON.generate({ :status => 'imported', :source_platform => 'hyperv', :vm_name => vm_name, :template_id => template_id })
+    end
 rescue OptionParser::ParseError => e
     warn e.message
     warn parser
