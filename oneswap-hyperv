@@ -47,7 +47,7 @@ parser = OptionParser.new do |opts|
 
     opts.separator ''
     opts.separator 'OpenNebula target:'
-    opts.on('--datastore IDS', String, 'Image datastore ID or comma-separated per-disk IDs') { |v| options[:datastore] = v }
+    opts.on('--datastore IDS', String, 'Image datastore ID or comma-separated per-disk IDs (required)') { |v| options[:datastore] = v }
     opts.on('--network IDS', String, 'OpenNebula VNet ID or comma-separated per-NIC IDs') { |v| options[:network] = v }
     opts.on('--one-cluster ID', Integer) { |v| options[:one_cluster] = v }
     opts.on('--one-host ID', Integer) { |v| options[:one_host] = v }
@@ -122,6 +122,18 @@ begin
     if options[:hyperv_connection].to_s.strip.empty? && options[:hyperv_host].to_s.strip.empty?
         raise 'provide --hyperv-connection ID (recommended) or direct --hyperv-host/--hyperv-identity/--hyperv-known-hosts options'
     end
+
+    validate_ids = lambda do |value, label, required|
+        parts = value.to_s.split(',').map(&:strip).reject(&:empty?)
+        raise "#{label} is required" if required && parts.empty?
+        parts.each do |part|
+            raise "invalid #{label} ID #{part.inspect}" unless part.match?(/\A\d+\z/)
+        end
+        parts
+    end
+    validate_ids.call(options[:datastore], 'OpenNebula image datastore', true)
+    validate_ids.call(options[:network], 'OpenNebula network', false)
+
     options[:http_port] ||= 29_869
 
     helper = OneSwapHelper.new
