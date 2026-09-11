@@ -6,6 +6,7 @@ on:
       - 'hyperv_helper.rb'
       - 'hyperv_hot_helper.rb'
       - 'hyperv_hot_hardening.rb'
+      - 'hyperv_hot_edge_hardening.rb'
       - 'oneswap-hyperv'
       - 'install.sh'
       - 'docs/HYPERV.md'
@@ -33,6 +34,7 @@ jobs:
           ruby -c hyperv_helper.rb
           ruby -c hyperv_hot_helper.rb
           ruby -c hyperv_hot_hardening.rb
+          ruby -c hyperv_hot_edge_hardening.rb
           ruby -c oneswap-hyperv
       - name: Focused Hyper-V tests
         run: |
@@ -64,7 +66,10 @@ jobs:
           grep -q "AllowedVlanIdList" hyperv_hot_hardening.rb
           grep -q "PrimaryVlanId" hyperv_hot_hardening.rb
           grep -q "SecondaryVlanIdList" hyperv_hot_hardening.rb
+          grep -q "ConvertTo-Json -InputObject \$nics" hyperv_hot_edge_hardening.rb
           grep -q "hyperv_hot_hardening.rb" install.sh
-          grep -q "hyperv_hot_hardening" oneswap-hyperv
+          grep -q "hyperv_hot_edge_hardening.rb" install.sh
+          grep -q "hyperv_hot_edge_hardening" oneswap-hyperv
           grep -q "virt-v2v-in-place failed after source shutdown" hyperv_hot_hardening.rb
           grep -q "refusing hot-migration cleanup outside PREPARED" hyperv_hot_hardening.rb
+          grep -q "MORPHING -> DELTA_APPLIED -> IMPORTING" docs/HYPERV_HOT_STATE_MACHINE.md
