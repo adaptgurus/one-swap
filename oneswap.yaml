@@ -19,6 +19,24 @@
 #:esxi_user: 'root'                       # ESXi username. Also used by delta prepare/commit when passwordless SSH is not available.
 #:esxi_pass: 'changeme123'                # ESXi password. Also used by delta prepare/commit when passwordless SSH is not available.
 
+# Hyper-V source connections
+# Prefer server-owned named profiles. Password authentication is not supported;
+# the identity file must be owner-only and known_hosts is always used with
+# StrictHostKeyChecking=yes. For --hot migrations, staging_dir must already
+# exist on the Hyper-V host and have enough capacity for reference-point exports.
+#:hyperv_connections:
+#  hv-prod:
+#    host: 'hv01.example.com'
+#    user: 'Administrator'
+#    port: 22
+#    identity_file: '/etc/one/oneswap/hyperv/hv-prod.key'
+#    known_hosts: '/etc/one/oneswap/hyperv/known_hosts'
+#    staging_dir: 'D:\\LayerSentryMigration'
+#    shutdown_timeout: 300                # Graceful Stop-VM -Shutdown timeout; no forced turnoff fallback
+#    transfer_timeout: 7200               # Baseline/final delta SSH transfer timeout
+#    prepare_timeout: 7200                # RCT reference-point create/export timeout
+#    delta_timeout: 7200                  # Final GetVirtualDiskChanges/delta generation timeout
+
 # NetApp Shift Options
 # Note: an uncommented :shift: puts every convert run into Shift mode.
 #:shift: 'https://172.20.0.124'           # Shift Toolkit appliance URL (scheme and host, no port)
@@ -66,14 +84,15 @@
 #:datastore: 1                            # ID of the OpenNebula Image datastore
 
 # virt-v2v Options
-#:work_dir: '/var/tmp'                        # Directory where disk conversion takes place, will make subdir for each VM
-#:format: 'qcow2'                         # Disk format [ qcow2 | raw ]
+#:work_dir: '/var/tmp'                    # Directory where disk conversion takes place, will make subdir for each VM
+#:format: 'qcow2'                         # Disk format [ qcow2 | raw ]; Hyper-V hot prepare always uses raw internally
 #:vddk_path:                              # Path to VDDK library
 #:qemu_ga_win:                            # Path to QEMU Guest Agent ISO for Windows
 #:qemu_ga_linux:                          # Install QEMU Guest Agent for Linux
 #:virtio_path:                            # Path to VirtIO drivers for Windows
 #:virt_tools: /usr/local/share/virt-tools # Path to the directory containing rhsrvany.exe
 #:v2v_path: 'virt-v2v'                    # Path to virt-v2v
+#:v2v_in_place_path: 'virt-v2v-in-place' # Required by Hyper-V hot finalization after applying RCT deltas
 #:libguestfs_path: /var/lib/one/libguestfs-appliance # Path to prebuilt libguestfs appliance for non-root execution
 #:root: 'first'                           # Choose the root filesystem to be converted
 
@@ -94,7 +113,7 @@
 #:one_cluster:                            # ID of the OpenNebula Cluster
 #:one_host:                               # ID of the OpenNebula Host
 #:one_datastore:                          # ID of the OpenNebula System Datastore
-#:one_datastore_cluster:                  # ID of the OpenNebula Cluster for automatic Datastore assignment
+#:one_datastore_cluster:                  # ID of the Cluster for automatic Datastore assignment
 
 # OpenNebula Ownership Options
 #:one_user:                               # Assign migrated objects to this OpenNebula user (name or numeric ID)

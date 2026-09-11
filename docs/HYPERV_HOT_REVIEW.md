@@ -1,0 +1,1 @@
+This branch implements the RCT warm/hot Hyper-V to OpenNebula pre-copy and final source-off cutover path. See HYPERV.md and HYPERV_HOT_STATE_MACHINE.md for the executable contract and certification boundary.

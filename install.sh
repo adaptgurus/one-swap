@@ -2,19 +2,8 @@
 
 # -------------------------------------------------------------------------- #
 # Copyright 2002-2025, OpenNebula Project, OpenNebula Systems                #
-#                                                                            #
-# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
-# not use this file except in compliance with the License. You may obtain    #
-# a copy of the License at                                                   #
-#                                                                            #
-# http://www.apache.org/licenses/LICENSE-2.0                                 #
-#                                                                            #
-# Unless required by applicable law or agreed to in writing, software        #
-# distributed under the License is distributed on an "AS IS" BASIS,          #
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
-# See the License for the specific language governing permissions and        #
-# limitations under the License.                                             #
-#--------------------------------------------------------------------------- #
+# Licensed under the Apache License, Version 2.0.                             #
+# -------------------------------------------------------------------------- #
 
 ARGS=$*
 
@@ -58,9 +47,6 @@ while true ; do
     esac
 done
 
-#-------------------------------------------------------------------------------
-# Definition of locations
-#-------------------------------------------------------------------------------
 if [ -z "$ROOT" ] ; then
     LIB_LOCATION="/usr/lib/one"
     SHARE_LOCATION="/usr/share/one"
@@ -79,25 +65,23 @@ fi
 
 LIB_DIRS="$LIB_LOCATION/ruby/cli/one_helper"
 MAN_LOCATION="/usr/share/man/man1"
-
 MAKE_DIRS="$BIN_LOCATION $SHARE_LOCATION $LIB_LOCATION $ETC_LOCATION
            $VAR_LOCATION $LIB_DIRS $SCRIPTS_LOCATION"
 
-#-------------------------------------------------------------------------------
-# FILE DEFINITION, WHAT IS GOING TO BE INSTALLED AND WHERE
-#-------------------------------------------------------------------------------
 INSTALL_FILES=(
     BIN_FILES:$BIN_LOCATION
-	ONE_CLI_LIB_FILES:$LIB_LOCATION/ruby/cli/one_helper
+    ONE_CLI_LIB_FILES:$LIB_LOCATION/ruby/cli/one_helper
     CONF_FILES:$ETC_LOCATION
     SCRIPTS_FILES:$SCRIPTS_LOCATION
 )
-
 
 BIN_FILES="oneswap oneswap-hyperv sesparse"
 ONE_CLI_LIB_FILES="esxi_client.rb \
                    esxi_vm.rb \
                    hyperv_helper.rb \
+                   hyperv_hot_helper.rb \
+                   hyperv_hot_hardening.rb \
+                   hyperv_hot_edge_hardening.rb \
                    netapp_shift_helper.rb \
                    oneswap_helper.rb \
                    oneswap_logger.rb \
@@ -106,51 +90,38 @@ ONE_CLI_LIB_FILES="esxi_client.rb \
 CONF_FILES="oneswap.yaml"
 SCRIPTS_FILES="scripts/*"
 
-#-----------------------------------------------------------------------------
-# INSTALL.SH SCRIPT
-#-----------------------------------------------------------------------------
-
 if [ "$MANPAGE" = "yes" ]; then
-    # base document
     echo "# oneswap(1) -- OpenNebula OneSwap Tool" > oneswap.1.ronn
     echo >> oneswap.1.ronn
     $BIN_LOCATION/oneswap --help >> oneswap.1.ronn
-
-    # manual pages/html
     ronn --style toc --manual="oneswap(1) -- OpenNebula OneSwap Tool" oneswap.1.ronn
     gzip -c oneswap.1 > oneswap.1.gz
-
     cp oneswap.1.gz $MAN_LOCATION
     rm -f oneswap.1.ronn oneswap.1.gz
-
     exit 0
 fi
 
 for d in $MAKE_DIRS; do
-	mkdir -p $DESTDIR$d
+    mkdir -p $DESTDIR$d
 done
 
 INSTALL_SET="${INSTALL_FILES[@]}"
 
 do_file() {
-	if [ "$LINK" = "yes" ]; then
-		ln -s $SRC_DIR/$1 $DESTDIR$2
-	else
-		cp -RL $SRC_DIR/$1 $DESTDIR$2
-	fi
+    if [ "$LINK" = "yes" ]; then
+        ln -s $SRC_DIR/$1 $DESTDIR$2
+    else
+        cp -RL $SRC_DIR/$1 $DESTDIR$2
+    fi
 }
 
 for i in ${INSTALL_SET[@]}; do
     SRC=$`echo $i | cut -d: -f1`
     DST=`echo $i | cut -d: -f2`
-
     eval SRC_FILES=$SRC
-
     for f in $SRC_FILES; do
         do_file $f $DST
     done
 done
 
-# Files created through downstream source-delivery APIs may not retain the
-# executable bit. Enforce it on installed command entrypoints.
 chmod +x "$DESTDIR$BIN_LOCATION/oneswap" "$DESTDIR$BIN_LOCATION/oneswap-hyperv" "$DESTDIR$BIN_LOCATION/sesparse"
