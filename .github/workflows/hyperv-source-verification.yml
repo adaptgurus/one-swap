@@ -5,6 +5,7 @@ on:
     paths:
       - 'hyperv_helper.rb'
       - 'hyperv_hot_helper.rb'
+      - 'hyperv_hot_hardening.rb'
       - 'oneswap-hyperv'
       - 'install.sh'
       - 'docs/HYPERV.md'
@@ -12,6 +13,7 @@ on:
       - 'oneswap.yaml'
       - 'tests/hyperv_helper_test.rb'
       - 'tests/hyperv_hot_helper_test.rb'
+      - 'tests/hyperv_hot_hardening_test.rb'
       - '.github/workflows/hyperv-source-verification.yml'
 
 permissions:
@@ -30,12 +32,14 @@ jobs:
           set -euo pipefail
           ruby -c hyperv_helper.rb
           ruby -c hyperv_hot_helper.rb
+          ruby -c hyperv_hot_hardening.rb
           ruby -c oneswap-hyperv
       - name: Focused Hyper-V tests
         run: |
           set -euo pipefail
           ruby -I. tests/hyperv_helper_test.rb
           ruby -I. tests/hyperv_hot_helper_test.rb
+          ruby -I. tests/hyperv_hot_hardening_test.rb
       - name: Installer syntax
         run: bash -n install.sh
       - name: Security and hot-cutover invariants
@@ -52,6 +56,15 @@ jobs:
           grep -q "ExportReferencePoint" hyperv_hot_helper.rb
           grep -q "Stop-VM -VM \$vm -Shutdown" hyperv_hot_helper.rb
           ! grep -q "Stop-VM -VM \$vm -TurnOff" hyperv_hot_helper.rb
-          grep -q "virt-v2v-in-place failed after source shutdown" hyperv_hot_helper.rb
-          grep -q "refusing hot-migration cleanup after cutover" hyperv_hot_helper.rb
-          grep -q "PREPARED -> CUTOVER_STARTED -> SOURCE_OFF -> DELTA_APPLIED -> IMPORTED -> DONE" docs/HYPERV_HOT_STATE_MACHINE.md
+          grep -q "qemu-img baseline conversion failed" hyperv_hot_hardening.rb
+          grep -q "MORPHING" hyperv_hot_hardening.rb
+          grep -q "IMPORTING" hyperv_hot_hardening.rb
+          grep -q "does not replay the query" hyperv_hot_hardening.rb
+          grep -q "type='raw'" hyperv_hot_hardening.rb
+          grep -q "AllowedVlanIdList" hyperv_hot_hardening.rb
+          grep -q "PrimaryVlanId" hyperv_hot_hardening.rb
+          grep -q "SecondaryVlanIdList" hyperv_hot_hardening.rb
+          grep -q "hyperv_hot_hardening.rb" install.sh
+          grep -q "hyperv_hot_hardening" oneswap-hyperv
+          grep -q "virt-v2v-in-place failed after source shutdown" hyperv_hot_hardening.rb
+          grep -q "refusing hot-migration cleanup outside PREPARED" hyperv_hot_hardening.rb
