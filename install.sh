@@ -2,7 +2,6 @@
 
 # -------------------------------------------------------------------------- #
 # Copyright 2002-2025, OpenNebula Project, OpenNebula Systems                #
-#                                                                            #
 # Licensed under the Apache License, Version 2.0.                             #
 # -------------------------------------------------------------------------- #
 
@@ -82,6 +81,7 @@ ONE_CLI_LIB_FILES="esxi_client.rb \
                    hyperv_helper.rb \
                    hyperv_hot_helper.rb \
                    hyperv_hot_hardening.rb \
+                   hyperv_hot_edge_hardening.rb \
                    netapp_shift_helper.rb \
                    oneswap_helper.rb \
                    oneswap_logger.rb \
