@@ -4,10 +4,13 @@ on:
   pull_request:
     paths:
       - 'hyperv_helper.rb'
+      - 'hyperv_hot_helper.rb'
       - 'oneswap-hyperv'
       - 'install.sh'
       - 'docs/HYPERV.md'
+      - 'oneswap.yaml'
       - 'tests/hyperv_helper_test.rb'
+      - 'tests/hyperv_hot_helper_test.rb'
       - '.github/workflows/hyperv-source-verification.yml'
 
 permissions:
@@ -25,14 +28,16 @@ jobs:
         run: |
           set -euo pipefail
           ruby -c hyperv_helper.rb
+          ruby -c hyperv_hot_helper.rb
           ruby -c oneswap-hyperv
       - name: Focused Hyper-V tests
         run: |
           set -euo pipefail
           ruby -I. tests/hyperv_helper_test.rb
+          ruby -I. tests/hyperv_hot_helper_test.rb
       - name: Installer syntax
         run: bash -n install.sh
-      - name: Security invariants
+      - name: Security and hot-cutover invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -41,3 +46,10 @@ jobs:
           ! grep -Eq -- '--hyperv-pass(word)?' oneswap-hyperv
           grep -q "SHA-256 mismatch" hyperv_helper.rb
           grep -q "source VM must be Off" hyperv_helper.rb
+          grep -q "GetVirtualDiskChanges" hyperv_hot_helper.rb
+          grep -q "CreateReferencePoint" hyperv_hot_helper.rb
+          grep -q "ExportReferencePoint" hyperv_hot_helper.rb
+          grep -q "Stop-VM -VM \$vm -Shutdown" hyperv_hot_helper.rb
+          ! grep -q "Stop-VM -VM \$vm -TurnOff" hyperv_hot_helper.rb
+          grep -q "virt-v2v-in-place failed after source shutdown" hyperv_hot_helper.rb
+          grep -q "refusing hot-migration cleanup after cutover" hyperv_hot_helper.rb
