@@ -82,6 +82,7 @@ ONE_CLI_LIB_FILES="esxi_client.rb \
                    hyperv_hot_helper.rb \
                    hyperv_hot_hardening.rb \
                    hyperv_hot_edge_hardening.rb \
+                   hyperv_virtio_hardening.rb \
                    netapp_shift_helper.rb \
                    oneswap_helper.rb \
                    oneswap_logger.rb \
