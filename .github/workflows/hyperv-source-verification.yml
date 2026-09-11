@@ -8,6 +8,7 @@ on:
       - 'oneswap-hyperv'
       - 'install.sh'
       - 'docs/HYPERV.md'
+      - 'docs/HYPERV_HOT_STATE_MACHINE.md'
       - 'oneswap.yaml'
       - 'tests/hyperv_helper_test.rb'
       - 'tests/hyperv_hot_helper_test.rb'
@@ -53,3 +54,4 @@ jobs:
           ! grep -q "Stop-VM -VM \$vm -TurnOff" hyperv_hot_helper.rb
           grep -q "virt-v2v-in-place failed after source shutdown" hyperv_hot_helper.rb
           grep -q "refusing hot-migration cleanup after cutover" hyperv_hot_helper.rb
+          grep -q "PREPARED -> CUTOVER_STARTED -> SOURCE_OFF -> DELTA_APPLIED -> IMPORTED -> DONE" docs/HYPERV_HOT_STATE_MACHINE.md
