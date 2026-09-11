@@ -150,3 +150,7 @@ for i in ${INSTALL_SET[@]}; do
         do_file $f $DST
     done
 done
+
+# Files created through downstream source-delivery APIs may not retain the
+# executable bit. Enforce it on installed command entrypoints.
+chmod +x "$DESTDIR$BIN_LOCATION/oneswap" "$DESTDIR$BIN_LOCATION/oneswap-hyperv" "$DESTDIR$BIN_LOCATION/sesparse"
