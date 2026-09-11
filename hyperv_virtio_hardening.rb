@@ -9,6 +9,7 @@ module OneSwapHyperV
         unless method_defined?(:layersentry_hot_validate_before_virtio_hardening)
             alias_method :layersentry_hot_validate_before_virtio_hardening, :validate_local_prerequisites!
             alias_method :layersentry_hot_morph_before_virtio_hardening, :rerun_v2v_in_place!
+            alias_method :layersentry_hot_target_digest_before_virtio_hardening, :target_digest
         end
 
         def validate_local_prerequisites!
@@ -49,6 +50,16 @@ module OneSwapHyperV
 
         private
 
+        def target_digest
+            guest_os = @options[:guest_os].to_s.downcase
+            virtio = guest_os == 'windows' ? (@options[:resolved_virtio_win] || resolve_virtio_win!) : ''
+            HotUtil.digest({
+                               'base_target_digest' => layersentry_hot_target_digest_before_virtio_hardening,
+                               'guest_os' => guest_os,
+                               'virtio_win_source' => virtio
+                           })
+        end
+
         def resolve_virtio_win!
             candidates = []
             candidates << @options[:virtio_path].to_s.strip
@@ -59,7 +70,7 @@ module OneSwapHyperV
                 return expanded if File.file?(expanded) && File.readable?(expanded)
                 return expanded if File.directory?(expanded) && File.readable?(expanded)
             end
-            raise Error, 'Windows Hyper-V migration requires a readable signed virtio-win bundle via --virtio, VIRTIO_WIN, or /usr/share/virtio-win before source cutover'
+            raise Error, 'Windows Hyper-V migration requires a readable trusted virtio-win bundle via --virtio, VIRTIO_WIN, or /usr/share/virtio-win before source cutover'
         end
     end
 end
