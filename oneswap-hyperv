@@ -15,7 +15,6 @@ if File.directory?(GEMS_LOCATION)
         require 'rubygems'
         Gem.use_paths(File.realpath(GEMS_LOCATION))
     rescue StandardError
-        # Preserve the same fail-later behavior as the primary OneSwap CLI.
     end
 end
 
@@ -31,6 +30,7 @@ require 'one_helper/hyperv_helper'
 require 'one_helper/hyperv_hot_helper'
 require 'one_helper/hyperv_hot_hardening'
 require 'one_helper/hyperv_hot_edge_hardening'
+require 'one_helper/hyperv_virtio_hardening'
 
 options = { :config_file => '/etc/one/oneswap.yaml' }
 
@@ -59,6 +59,7 @@ parser = OptionParser.new do |opts|
     opts.on('--hyperv-prepare-timeout SECONDS', Integer, 'Reference-point export timeout') { |v| options[:hyperv_prepare_timeout] = v }
     opts.on('--hyperv-delta-timeout SECONDS', Integer, 'Final RCT delta generation timeout') { |v| options[:hyperv_delta_timeout] = v }
     opts.on('--shutdown-timeout SECONDS', Integer, 'Graceful source shutdown timeout; no forced power-off fallback') { |v| options[:shutdown_timeout] = v }
+    opts.on('--guest-os FAMILY', String, 'Guest OS authority from LayerSentry agent: windows or linux') { |v| options[:guest_os] = v.to_s.downcase }
 
     opts.separator ''
     opts.separator 'OpenNebula target:'
@@ -81,9 +82,9 @@ parser = OptionParser.new do |opts|
     opts.on('--v2v-in-place-path PATH', String) { |v| options[:v2v_in_place_path] = v }
     opts.on('--libguestfs-path PATH', String) { |v| options[:libguestfs_path] = v }
     opts.on('--root ROOT', String) { |v| options[:root] = v }
-    opts.on('--virtio PATH', String, 'virtio-win ISO/path used by existing OneSwap guest injection') { |v| options[:virtio_path] = v }
+    opts.on('--virtio PATH', String, 'trusted virtio-win ISO/directory used for Windows KVM driver injection') { |v| options[:virtio_path] = v }
     opts.on('--win-qemu-ga PATH', String) { |v| options[:qemu_ga_win] = v }
-    opts.on('--qemu-ga', 'Install qemu-guest-agent in Linux') { options[:qemu_ga_linux] = true }
+    opts.on('--qemu-ga', 'Install QEMU Guest Agent for Linux') { options[:qemu_ga_linux] = true }
     opts.on('--context-package PATH', String) { |v| options[:context] = v }
     opts.on('--skip-context', 'Skip OpenNebula contextualization package injection') { options[:skip_context] = true }
     opts.on('--context-min-free MB', Integer) { |v| options[:context_min_free] = v }
@@ -132,6 +133,9 @@ begin
 
     if options[:hyperv_connection].to_s.strip.empty? && options[:hyperv_host].to_s.strip.empty?
         raise 'provide --hyperv-connection ID (recommended) or direct --hyperv-host/--hyperv-identity/--hyperv-known-hosts options'
+    end
+    unless options[:guest_os].to_s.empty? || %w[windows linux].include?(options[:guest_os].to_s)
+        raise '--guest-os must be windows or linux when supplied by the LayerSentry guest authority'
     end
 
     validate_ids = lambda do |value, label, required|
