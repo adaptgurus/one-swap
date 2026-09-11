@@ -29,6 +29,7 @@ require 'yaml'
 require 'one_helper/oneswap_helper'
 require 'one_helper/hyperv_helper'
 require 'one_helper/hyperv_hot_helper'
+require 'one_helper/hyperv_hot_hardening'
 
 options = { :config_file => '/etc/one/oneswap.yaml' }
 
