@@ -1,5 +1,16 @@
 require 'minitest/autorun'
 require 'tmpdir'
+
+# Source tests do not require an installed OpenNebula Ruby package. The actual
+# oneswap-hyperv CLI loads `opennebula` before these helpers. Mark pool features
+# as loaded here so recovery helpers can be source-tested with lightweight stubs.
+$LOADED_FEATURES << 'opennebula/image_pool.rb' unless $LOADED_FEATURES.include?('opennebula/image_pool.rb')
+$LOADED_FEATURES << 'opennebula/template_pool.rb' unless $LOADED_FEATURES.include?('opennebula/template_pool.rb')
+module OpenNebula
+  class ImagePool; end unless const_defined?(:ImagePool)
+  class TemplatePool; end unless const_defined?(:TemplatePool)
+end
+
 class ConversionError < StandardError; end unless defined?(ConversionError)
 class OneSwapHelper; end unless defined?(OneSwapHelper)
 require_relative '../hyperv_virtio_hardening'
@@ -96,5 +107,51 @@ class HyperVVirtIOHardeningTest < Minitest::Test
       coordinator.send(:validate_guest_mac_binding!, metadata)
     end
     assert_match(/guest agent MAC inventory does not match/, error.message)
+  end
+
+  def test_windows_secure_boot_requires_qualified_windows_template_and_explicit_firmware
+    Dir.mktmpdir do |dir|
+      firmware = File.join(dir, 'OVMF_CODE.secboot.fd')
+      File.write(firmware, 'test firmware')
+      coordinator = OneSwapHyperV::HotCoordinator.allocate
+      coordinator.instance_variable_set(:@options, { :guest_os => 'windows', :uefi_sec_path => firmware })
+      metadata = { 'SecureBoot' => true, 'SecureBootTemplate' => 'MicrosoftWindows' }
+      assert coordinator.send(:validate_secure_boot_target!, metadata)
+    end
+  end
+
+  def test_linux_secure_boot_requires_microsoft_uefi_ca_template
+    Dir.mktmpdir do |dir|
+      firmware = File.join(dir, 'OVMF_CODE.secboot.fd')
+      File.write(firmware, 'test firmware')
+      coordinator = OneSwapHyperV::HotCoordinator.allocate
+      coordinator.instance_variable_set(:@options, { :guest_os => 'linux', :uefi_sec_path => firmware })
+      metadata = { 'SecureBoot' => true, 'SecureBootTemplate' => 'MicrosoftUEFICertificateAuthority' }
+      assert coordinator.send(:validate_secure_boot_target!, metadata)
+    end
+  end
+
+  def test_secure_boot_rejects_missing_explicit_target_firmware
+    coordinator = OneSwapHyperV::HotCoordinator.allocate
+    coordinator.instance_variable_set(:@options, { :guest_os => 'windows', :uefi_sec_path => '' })
+    metadata = { 'SecureBoot' => true, 'SecureBootTemplate' => 'MicrosoftWindows' }
+    error = assert_raises(OneSwapHyperV::Error) do
+      coordinator.send(:validate_secure_boot_target!, metadata)
+    end
+    assert_match(/explicit qualified --uefi-sec-path/, error.message)
+  end
+
+  def test_secure_boot_rejects_source_template_guest_family_mismatch
+    Dir.mktmpdir do |dir|
+      firmware = File.join(dir, 'OVMF_CODE.secboot.fd')
+      File.write(firmware, 'test firmware')
+      coordinator = OneSwapHyperV::HotCoordinator.allocate
+      coordinator.instance_variable_set(:@options, { :guest_os => 'linux', :uefi_sec_path => firmware })
+      metadata = { 'SecureBoot' => true, 'SecureBootTemplate' => 'MicrosoftWindows' }
+      error = assert_raises(OneSwapHyperV::Error) do
+        coordinator.send(:validate_secure_boot_target!, metadata)
+      end
+      assert_match(/not qualified for agent-authoritative linux/, error.message)
+    end
   end
 end
