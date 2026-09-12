@@ -2,7 +2,7 @@
 # LayerSentry Hyper-V VirtIO production qualification                        #
 # -------------------------------------------------------------------------- #
 
-require_relative 'hyperv_source_security_hardening'
+require_relative 'hyperv_materialization_guard'
 
 module OneSwapHyperV
     class HotCoordinator
