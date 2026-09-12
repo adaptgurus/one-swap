@@ -2,7 +2,7 @@
 # LayerSentry Hyper-V VirtIO production qualification                        #
 # -------------------------------------------------------------------------- #
 
-require_relative 'hyperv_materialization_guard'
+require_relative 'hyperv_import_recovery'
 
 module OneSwapHyperV
     class HotCoordinator
@@ -25,6 +25,7 @@ module OneSwapHyperV
         def validate_target_mapping!(metadata)
             layersentry_hot_target_mapping_before_guest_binding(metadata)
             validate_guest_mac_binding!(metadata)
+            validate_secure_boot_target!(metadata)
             true
         end
 
@@ -60,7 +61,8 @@ module OneSwapHyperV
                                'base_target_digest' => layersentry_hot_target_digest_before_virtio_hardening,
                                'guest_os' => guest_os,
                                'virtio_win_source' => virtio,
-                               'expected_guest_macs' => normalized_expected_guest_macs
+                               'expected_guest_macs' => normalized_expected_guest_macs,
+                               'qualified_secure_uefi' => @options[:uefi_sec_path].to_s
                            })
         end
 
@@ -114,6 +116,35 @@ module OneSwapHyperV
             return nil if hex[0, 2].to_i(16).odd?
 
             hex.scan(/../).join(':')
+        end
+
+        def validate_secure_boot_target!(metadata)
+            return true unless Util.bool(metadata['SecureBoot'])
+
+            guest_os = @options[:guest_os].to_s.downcase
+            unless %w[windows linux].include?(guest_os)
+                raise Error, 'Secure Boot Hyper-V migration requires an agent-authoritative guest OS family before cutover'
+            end
+            firmware = @options[:uefi_sec_path].to_s.strip
+            if firmware.empty?
+                raise Error, 'Secure Boot Hyper-V migration requires an explicit qualified --uefi-sec-path; generic firmware fallback is prohibited'
+            end
+            unless File.file?(firmware) && File.readable?(firmware)
+                raise Error, "qualified secure UEFI firmware is unavailable or unreadable: #{firmware}"
+            end
+
+            source_template = metadata['SecureBootTemplate'].to_s.strip
+            normalized = source_template.downcase.gsub(/[^a-z0-9]/, '')
+            allowed = case guest_os
+                      when 'windows'
+                          %w[microsoftwindows]
+                      when 'linux'
+                          %w[microsoftueficertificateauthority]
+                      end
+            unless allowed.include?(normalized)
+                raise Error, "Hyper-V Secure Boot template #{source_template.inspect} is not qualified for agent-authoritative #{guest_os} migration"
+            end
+            true
         end
 
         def resolve_virtio_win!
