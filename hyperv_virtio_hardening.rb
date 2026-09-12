@@ -2,7 +2,7 @@
 # LayerSentry Hyper-V VirtIO production qualification                        #
 # -------------------------------------------------------------------------- #
 
-require_relative 'hyperv_hot_hardening'
+require_relative 'hyperv_source_security_hardening'
 
 module OneSwapHyperV
     class HotCoordinator
@@ -29,10 +29,6 @@ module OneSwapHyperV
         end
 
         def rerun_v2v_in_place!(state)
-            # The hardened parent implementation is intentionally not called:
-            # this override is the same single post-RCT morph with VIRTIO_WIN
-            # pinned into the environment for Windows. The source is already
-            # OFF and the RAW baseline has already received the final RCT data.
             xml = File.join(@dir, 'final-libvirt.xml')
             raw_paths = state['disks'].map { |disk| disk['prepared_raw_path'] }
             File.open(xml, 'w', 0o600) do |file|
