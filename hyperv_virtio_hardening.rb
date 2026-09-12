@@ -70,16 +70,24 @@ module OneSwapHyperV
 
         def validate_guest_mac_binding!(metadata)
             expected = normalized_expected_guest_macs
+            source_nics = Array(metadata['NICs'])
+            agent_driven = %w[windows linux].include?(@options[:guest_os].to_s.downcase)
+            if agent_driven && source_nics.any? && expected.empty?
+                raise Error, 'agent-driven Hyper-V migration requires guest MAC evidence for every source VM with NICs'
+            end
+            return true if source_nics.empty? && expected.empty?
             return true if expected.empty?
 
-            source_nics = Array(metadata['NICs'])
             actual = source_nics.map do |nic|
                 normalize_mac(nic['MacAddress'])
             end
             if actual.any?(&:nil?) || actual.length != source_nics.length
                 raise Error, 'unable to resolve every Hyper-V source NIC MAC for guest-agent binding'
             end
-            actual = actual.uniq.sort
+            if actual.uniq.length != actual.length
+                raise Error, 'Hyper-V source VM reports duplicate NIC MAC addresses; automatic guest identity binding is unsafe'
+            end
+            actual = actual.sort
             missing = actual - expected
             unless missing.empty?
                 raise Error, "guest agent MAC inventory does not match the Hyper-V source VM; missing source MAC(s): #{missing.join(',')}"
@@ -99,8 +107,15 @@ module OneSwapHyperV
         end
 
         def normalize_mac(value)
-            hex = value.to_s.gsub(/[^0-9A-Fa-f]/, '').downcase
-            return nil unless hex.match?(/\A[0-9a-f]{12}\z/)
+            raw = value.to_s.strip
+            hex = if raw.match?(/\A[0-9A-Fa-f]{12}\z/)
+                      raw.downcase
+                  elsif raw.match?(/\A(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}\z/) || raw.match?(/\A(?:[0-9A-Fa-f]{2}-){5}[0-9A-Fa-f]{2}\z/)
+                      raw.delete(':-').downcase
+                  end
+            return nil unless hex&.match?(/\A[0-9a-f]{12}\z/)
+            return nil if hex == ('0' * 12) || hex == ('f' * 12)
+            return nil if hex[0, 2].to_i(16).odd?
 
             hex.scan(/../).join(':')
         end
