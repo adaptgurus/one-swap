@@ -85,6 +85,7 @@ ONE_CLI_LIB_FILES="esxi_client.rb \
                    hyperv_state_hardening.rb \
                    hyperv_source_security_hardening.rb \
                    hyperv_materialization_guard.rb \
+                   hyperv_import_recovery.rb \
                    hyperv_virtio_hardening.rb \
                    netapp_shift_helper.rb \
                    oneswap_helper.rb \
