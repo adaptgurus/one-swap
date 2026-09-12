@@ -10,8 +10,53 @@ module OneSwapHyperV
         unless method_defined?(:layersentry_capture_before_import_transport_hardening)
             alias_method :layersentry_capture_before_import_transport_hardening, :capture_final_delta!
         end
+        unless method_defined?(:layersentry_validate_before_import_customization_hardening)
+            alias_method :layersentry_validate_before_import_customization_hardening, :validate_local_prerequisites!
+        end
+
+        def validate_local_prerequisites!
+            layersentry_validate_before_import_customization_hardening
+            validate_reflink_workspace!
+            true
+        end
 
         private
+
+        # Automatic recovery of guest customization requires an immutable
+        # post-RCT/morphed baseline. Require a COW reflink-capable workspace
+        # before source shutdown so a crash during contextualization can discard
+        # the clone and safely retry without replaying mutation on the baseline.
+        def validate_reflink_workspace!
+            return true unless %w[windows linux].include?(@options[:guest_os].to_s.downcase)
+
+            FileUtils.mkdir_p(@dir, mode: 0o700)
+            source = File.join(@dir, ".layersentry-reflink-probe-#{Process.pid}-#{SecureRandom.hex(4)}")
+            clone = "#{source}.clone"
+            File.open(source, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+                file.write('layersentry-reflink-probe')
+                file.flush
+                file.fsync
+            end
+            stdout, stderr, status = Open3.capture3('cp', '--reflink=always', '--sparse=always', '--', source, clone)
+            unless status.success? && File.file?(clone)
+                raise Error, "restart-safe Hyper-V import requires a reflink-capable conversion workspace; cp --reflink=always failed: #{stderr.empty? ? stdout : stderr}"
+            end
+            File.open(clone, 'r+b') do |file|
+                file.seek(0)
+                file.write('X')
+                file.flush
+                file.fsync
+            end
+            unless File.read(source) == 'layersentry-reflink-probe'
+                raise Error, 'conversion workspace clone did not exhibit copy-on-write isolation'
+            end
+            true
+        rescue Errno::ENOENT => e
+            raise Error, "restart-safe Hyper-V import requires GNU cp with --reflink support: #{e.message}"
+        ensure
+            FileUtils.rm_f(clone) if defined?(clone) && clone
+            FileUtils.rm_f(source) if defined?(source) && source
+        end
 
         # A crash during DELTA_CAPTURING may leave a complete or partial local
         # bundle that was never durably recorded. Recreate local capture staging
@@ -24,6 +69,135 @@ module OneSwapHyperV
                 FileUtils.mkdir_p(delta_dir, mode: 0o700)
             end
             layersentry_capture_before_import_transport_hardening(state)
+        end
+
+        # Recoverable per-disk import. Marked OpenNebula objects are adopted
+        # first. If no Image exists, guest customization runs on an operation-
+        # scoped COW reflink, never on the immutable post-RCT/morphed baseline.
+        # A crash in STARTED therefore deletes the clone and retries safely.
+        def ensure_recoverable_images!(state)
+            if !@options[:http_transfer] && @helper.respond_to?(:local_path_image_allocation_preflight!, true)
+                @helper.send(:local_path_image_allocation_preflight!)
+            end
+            imports = Array(state['image_imports'])
+            disks = Array(state['disks'])
+            datastores = @options[:datastore].to_s.split(',').map(&:strip).reject(&:empty?)
+            raise Error, 'OpenNebula Image Datastore mapping disappeared during import' if datastores.empty?
+
+            disks.each_with_index.map do |disk, index|
+                record = imports.find { |entry| Integer(entry['index']) == index }
+                record ||= { 'index' => index, 'customization' => 'PENDING' }
+                images_for_marker = find_marked_images(index)
+                raise Error, "multiple OpenNebula Images carry LayerSentry operation marker #{@operation_id.inspect} for disk #{index}; automatic adoption is unsafe" if images_for_marker.length > 1
+
+                image = nil
+                if record['image_id']
+                    image = load_image(Integer(record['image_id']))
+                    validate_image_marker!(image, index) if image
+                end
+                if image.nil? && images_for_marker.length == 1
+                    image = images_for_marker.first
+                    validate_image_marker!(image, index)
+                    record['image_id'] = image.id.to_i
+                    record['adopted_at'] ||= Time.now.utc.iso8601
+                    upsert_image_record!(state, record)
+                end
+
+                unless image
+                    import_path = prepare_recoverable_import_disk!(state, disk, index, record)
+                    ds_id = Integer(datastores[index] || datastores.first)
+                    import_disk = disk.merge('prepared_raw_path' => import_path)
+                    image = allocate_marked_image!(state, import_disk, index, record, ds_id)
+                    record['image_id'] = image.id.to_i
+                    record['allocated_at'] ||= Time.now.utc.iso8601
+                    upsert_image_record!(state, record)
+                end
+
+                wait_for_image_ready!(image, index)
+                record['image_id'] = image.id.to_i
+                record['ready_at'] ||= Time.now.utc.iso8601
+                upsert_image_record!(state, record)
+                { :id => image.id.to_i, :os => record['os'] || marker_value(image, 'LAYERSENTRY_OS_NAME') }
+            end
+        end
+
+        def prepare_recoverable_import_disk!(state, disk, index, record)
+            baseline = File.expand_path(disk['prepared_raw_path'].to_s)
+            raise Error, "immutable prepared RAW baseline for disk #{index} is missing" unless File.file?(baseline)
+
+            if record['customization'] == 'DONE'
+                path = record['import_path'].to_s
+                path = baseline if path.empty?
+                if path == baseline
+                    return baseline
+                end
+                begin
+                    verify_local_artifact!(path, Integer(record['import_size']), record['import_sha256'].to_s, "customized import disk #{index}")
+                    return path
+                rescue StandardError
+                    # No marked Image exists (caller checked first), so it is
+                    # safe to discard only the operation-scoped clone and rebuild
+                    # from the immutable baseline.
+                    FileUtils.rm_f(path)
+                    record['customization'] = 'PENDING'
+                    record.delete('import_path')
+                    record.delete('import_size')
+                    record.delete('import_sha256')
+                    upsert_image_record!(state, record)
+                end
+            end
+
+            guest_info = @helper.send(:detect_distro, baseline)
+            unless guest_info
+                record['os'] = false
+                record['image_type'] = 'DATABLOCK'
+                record['import_path'] = baseline
+                record['customization'] = 'DONE'
+                record['customized_at'] ||= Time.now.utc.iso8601
+                upsert_image_record!(state, record)
+                return baseline
+            end
+
+            import_path = File.join(@dir, "import-disk-#{index}-#{Digest::SHA256.hexdigest(@operation_id.to_s)[0, 12]}.raw")
+            FileUtils.rm_f(import_path) if record['customization'] == 'STARTED' || File.exist?(import_path)
+            record['customization'] = 'STARTED'
+            record['import_path'] = import_path
+            record['customization_started_at'] ||= Time.now.utc.iso8601
+            upsert_image_record!(state, record)
+
+            reflink_clone!(baseline, import_path, index)
+            @helper.send(:package_injection, import_path, guest_info)
+            @helper.send(:remove_vmtools_injection, import_path, guest_info)
+            fsync_local_file_and_parent!(import_path)
+
+            record['os'] = guest_info['name']
+            record['image_type'] = 'OS'
+            record['import_size'] = File.size(import_path)
+            record['import_sha256'] = Digest::SHA256.file(import_path).hexdigest
+            record['customization'] = 'DONE'
+            record['customized_at'] = Time.now.utc.iso8601
+            upsert_image_record!(state, record)
+            import_path
+        end
+
+        def reflink_clone!(source, destination, index)
+            stdout, stderr, status = Open3.capture3('cp', '--reflink=always', '--sparse=always', '--', source, destination)
+            unless status.success? && File.file?(destination)
+                FileUtils.rm_f(destination)
+                raise Error, "restart-safe COW clone failed for disk #{index}: #{stderr.empty? ? stdout : stderr}"
+            end
+            File.chmod(0o600, destination)
+            fsync_local_file_and_parent!(destination)
+            destination
+        rescue Errno::ENOENT => e
+            FileUtils.rm_f(destination)
+            raise Error, "restart-safe COW clone requires GNU cp: #{e.message}"
+        end
+
+        def fsync_local_file_and_parent!(path)
+            File.open(path, 'rb') { |file| file.fsync }
+            File.open(File.dirname(path), 'r') { |dir| dir.fsync }
+            true
         end
 
         # OpenNebula can download PATH asynchronously after image.allocate
@@ -73,9 +247,6 @@ module OneSwapHyperV
                 @helper.send(:chown_one_object, image, *@helper.send(:resolve_one_ownership))
             end
 
-            # Critical for HTTP transfer: wait while the operation-scoped server
-            # is still running. The caller may wait once more; that is a safe,
-            # read-only READY check.
             wait_for_image_ready!(image, index) if server_thread
             image
         ensure
