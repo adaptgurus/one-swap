@@ -10,6 +10,7 @@ module OneSwapHyperV
             alias_method :layersentry_hot_validate_before_virtio_hardening, :validate_local_prerequisites!
             alias_method :layersentry_hot_morph_before_virtio_hardening, :rerun_v2v_in_place!
             alias_method :layersentry_hot_target_digest_before_virtio_hardening, :target_digest
+            alias_method :layersentry_hot_target_mapping_before_guest_binding, :validate_target_mapping!
         end
 
         def validate_local_prerequisites!
@@ -18,6 +19,12 @@ module OneSwapHyperV
 
             bundle = resolve_virtio_win!
             @options[:resolved_virtio_win] = bundle
+            true
+        end
+
+        def validate_target_mapping!(metadata)
+            layersentry_hot_target_mapping_before_guest_binding(metadata)
+            validate_guest_mac_binding!(metadata)
             true
         end
 
@@ -56,8 +63,46 @@ module OneSwapHyperV
             HotUtil.digest({
                                'base_target_digest' => layersentry_hot_target_digest_before_virtio_hardening,
                                'guest_os' => guest_os,
-                               'virtio_win_source' => virtio
+                               'virtio_win_source' => virtio,
+                               'expected_guest_macs' => normalized_expected_guest_macs
                            })
+        end
+
+        def validate_guest_mac_binding!(metadata)
+            expected = normalized_expected_guest_macs
+            return true if expected.empty?
+
+            source_nics = Array(metadata['NICs'])
+            actual = source_nics.map do |nic|
+                normalize_mac(nic['MacAddress'])
+            end
+            if actual.any?(&:nil?) || actual.length != source_nics.length
+                raise Error, 'unable to resolve every Hyper-V source NIC MAC for guest-agent binding'
+            end
+            actual = actual.uniq.sort
+            missing = actual - expected
+            unless missing.empty?
+                raise Error, "guest agent MAC inventory does not match the Hyper-V source VM; missing source MAC(s): #{missing.join(',')}"
+            end
+            true
+        end
+
+        def normalized_expected_guest_macs
+            raw = @options[:expected_guest_macs].to_s
+            return [] if raw.strip.empty?
+
+            raw.split(',').map do |value|
+                mac = normalize_mac(value)
+                raise Error, "invalid expected guest MAC #{value.inspect}" unless mac
+                mac
+            end.uniq.sort
+        end
+
+        def normalize_mac(value)
+            hex = value.to_s.gsub(/[^0-9A-Fa-f]/, '').downcase
+            return nil unless hex.match?(/\A[0-9a-f]{12}\z/)
+
+            hex.scan(/../).join(':')
         end
 
         def resolve_virtio_win!
