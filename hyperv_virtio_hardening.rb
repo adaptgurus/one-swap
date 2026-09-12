@@ -2,7 +2,7 @@
 # LayerSentry Hyper-V VirtIO production qualification                        #
 # -------------------------------------------------------------------------- #
 
-require_relative 'hyperv_import_recovery'
+require_relative 'hyperv_import_recovery_hardening'
 
 module OneSwapHyperV
     class HotCoordinator
