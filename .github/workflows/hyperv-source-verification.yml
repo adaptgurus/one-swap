@@ -48,7 +48,7 @@ jobs:
           ruby -I. tests/hyperv_virtio_hardening_test.rb
       - name: Installer syntax
         run: bash -n install.sh
-      - name: Security, data and VirtIO invariants
+      - name: Security, data, agent binding and VirtIO invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -74,6 +74,8 @@ jobs:
           grep -q "hyperv_virtio_hardening.rb" install.sh
           grep -q "hyperv_virtio_hardening" oneswap-hyperv
           grep -q -- "--guest-os" oneswap-hyperv
+          grep -q -- "--expected-guest-macs" oneswap-hyperv
+          grep -q "guest agent MAC inventory does not match" hyperv_virtio_hardening.rb
           grep -q "VIRTIO_WIN" hyperv_virtio_hardening.rb
           grep -q "virtio-win bundle" hyperv_virtio_hardening.rb
           grep -q "virt-v2v-in-place failed after source shutdown" hyperv_virtio_hardening.rb
