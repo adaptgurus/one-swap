@@ -34,18 +34,61 @@ class HyperVVirtIOHardeningTest < Minitest::Test
                  coordinator.send(:normalized_expected_guest_macs)
   end
 
+  def test_expected_guest_mac_parser_rejects_embedded_junk
+    coordinator = OneSwapHyperV::HotCoordinator.allocate
+    coordinator.instance_variable_set(:@options, {
+      :expected_guest_macs => 'junk00:15:5d:01:02:03more'
+    })
+    assert_raises(OneSwapHyperV::Error) do
+      coordinator.send(:normalized_expected_guest_macs)
+    end
+  end
+
   def test_guest_mac_binding_accepts_hyperv_source_macs_with_extra_guest_virtual_mac
     coordinator = OneSwapHyperV::HotCoordinator.allocate
     coordinator.instance_variable_set(:@options, {
+      :guest_os => 'linux',
       :expected_guest_macs => '00:15:5d:01:02:03,02:42:ac:11:00:02'
     })
     metadata = { 'NICs' => [{ 'MacAddress' => '00155D010203' }] }
     assert coordinator.send(:validate_guest_mac_binding!, metadata)
   end
 
+  def test_agent_driven_guest_mac_binding_rejects_missing_evidence_when_source_has_nics
+    coordinator = OneSwapHyperV::HotCoordinator.allocate
+    coordinator.instance_variable_set(:@options, {
+      :guest_os => 'windows',
+      :expected_guest_macs => ''
+    })
+    metadata = { 'NICs' => [{ 'MacAddress' => '00155D010203' }] }
+    error = assert_raises(OneSwapHyperV::Error) do
+      coordinator.send(:validate_guest_mac_binding!, metadata)
+    end
+    assert_match(/requires guest MAC evidence/, error.message)
+  end
+
+  def test_guest_mac_binding_rejects_duplicate_source_macs
+    coordinator = OneSwapHyperV::HotCoordinator.allocate
+    coordinator.instance_variable_set(:@options, {
+      :guest_os => 'linux',
+      :expected_guest_macs => '00:15:5d:01:02:03'
+    })
+    metadata = {
+      'NICs' => [
+        { 'MacAddress' => '00155D010203' },
+        { 'MacAddress' => '00-15-5D-01-02-03' }
+      ]
+    }
+    error = assert_raises(OneSwapHyperV::Error) do
+      coordinator.send(:validate_guest_mac_binding!, metadata)
+    end
+    assert_match(/duplicate NIC MAC/, error.message)
+  end
+
   def test_guest_mac_binding_rejects_wrong_agent_or_changed_source_mac
     coordinator = OneSwapHyperV::HotCoordinator.allocate
     coordinator.instance_variable_set(:@options, {
+      :guest_os => 'windows',
       :expected_guest_macs => '00:15:5d:01:02:04'
     })
     metadata = { 'NICs' => [{ 'MacAddress' => '00-15-5D-01-02-03' }] }
