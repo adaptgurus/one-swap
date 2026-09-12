@@ -2,7 +2,7 @@
 # LayerSentry Hyper-V source security/device authority hardening              #
 # -------------------------------------------------------------------------- #
 
-require_relative 'hyperv_hot_hardening'
+require_relative 'hyperv_state_hardening'
 
 module OneSwapHyperV
     class HotSource
