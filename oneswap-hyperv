@@ -31,6 +31,7 @@ require 'one_helper/hyperv_hot_helper'
 require 'one_helper/hyperv_hot_hardening'
 require 'one_helper/hyperv_hot_edge_hardening'
 require 'one_helper/hyperv_virtio_hardening'
+require 'one_helper/hyperv_final_safety_hardening'
 
 options = { :config_file => '/etc/one/oneswap.yaml' }
 
@@ -61,7 +62,7 @@ parser = OptionParser.new do |opts|
     opts.on('--hyperv-delta-timeout SECONDS', Integer, 'Final RCT delta generation timeout') { |v| options[:hyperv_delta_timeout] = v }
     opts.on('--shutdown-timeout SECONDS', Integer, 'Graceful source shutdown timeout; no forced power-off fallback') { |v| options[:shutdown_timeout] = v }
     opts.on('--guest-os FAMILY', String, 'Guest OS authority from LayerSentry agent: windows or linux') { |v| options[:guest_os] = v.to_s.downcase }
-    opts.on('--expected-guest-macs MACS', String, 'Comma-separated MAC baseline from the LayerSentry guest agent') { |v| options[:expected_guest_macs] = v }
+    opts.on('--expected-guest-macs LIST', String, 'Canonical guest MAC baseline from LayerSentry agent') { |v| options[:expected_guest_macs] = v }
 
     opts.separator ''
     opts.separator 'OpenNebula target:'
