@@ -15,7 +15,6 @@ if File.directory?(GEMS_LOCATION)
         require 'rubygems'
         Gem.use_paths(File.realpath(GEMS_LOCATION))
     rescue StandardError
-        # Preserve the same fail-later behavior as the primary OneSwap CLI.
     end
 end
 
@@ -31,6 +30,9 @@ require 'one_helper/hyperv_helper'
 require 'one_helper/hyperv_hot_helper'
 require 'one_helper/hyperv_hot_hardening'
 require 'one_helper/hyperv_hot_edge_hardening'
+require 'one_helper/hyperv_virtio_hardening'
+require 'one_helper/hyperv_final_safety_hardening'
+require 'one_helper/hyperv_network_hardening'
 
 options = { :config_file => '/etc/one/oneswap.yaml' }
 
@@ -42,6 +44,7 @@ parser = OptionParser.new do |opts|
     opts.on('--preflight', 'Validate hot migration without creating a reference point') { options[:preflight] = true }
     opts.on('--prepare', 'Create/export RCT reference point and build prepared RAW target disks') { options[:prepare] = true }
     opts.on('--commit', 'Revalidate, gracefully stop source VM, apply final RCT delta and import target') { options[:commit] = true }
+    opts.on('--verify-source-off', 'Verify the same Hyper-V source remains Off immediately before OpenNebula materialization') { options[:verify_source_off] = true }
     opts.on('--cleanup', 'Remove prepared RCT/staging state before cutover') { options[:cleanup] = true }
     opts.on('--finalize-success', 'Cleanup RCT/staging after LayerSentry independently validates target success') { options[:finalize_success] = true }
     opts.on('--operation-id ID', String, 'Durable LayerSentry operation ID required for hot phases') { |v| options[:operation_id] = v }
@@ -59,6 +62,9 @@ parser = OptionParser.new do |opts|
     opts.on('--hyperv-prepare-timeout SECONDS', Integer, 'Reference-point export timeout') { |v| options[:hyperv_prepare_timeout] = v }
     opts.on('--hyperv-delta-timeout SECONDS', Integer, 'Final RCT delta generation timeout') { |v| options[:hyperv_delta_timeout] = v }
     opts.on('--shutdown-timeout SECONDS', Integer, 'Graceful source shutdown timeout; no forced power-off fallback') { |v| options[:shutdown_timeout] = v }
+    opts.on('--guest-os FAMILY', String, 'Guest OS authority from LayerSentry agent: windows or linux') { |v| options[:guest_os] = v.to_s.downcase }
+    opts.on('--expected-guest-macs LIST', String, 'Canonical guest MAC baseline from LayerSentry agent') { |v| options[:expected_guest_macs] = v }
+    opts.on('--guest-network-profile B64', String, 'Base64url LayerSentry Windows DHCP/static network intent') { |v| options[:guest_network_profile] = v }
 
     opts.separator ''
     opts.separator 'OpenNebula target:'
@@ -81,9 +87,9 @@ parser = OptionParser.new do |opts|
     opts.on('--v2v-in-place-path PATH', String) { |v| options[:v2v_in_place_path] = v }
     opts.on('--libguestfs-path PATH', String) { |v| options[:libguestfs_path] = v }
     opts.on('--root ROOT', String) { |v| options[:root] = v }
-    opts.on('--virtio PATH', String, 'virtio-win ISO/path used by existing OneSwap guest injection') { |v| options[:virtio_path] = v }
+    opts.on('--virtio PATH', String, 'trusted virtio-win ISO/directory used for Windows KVM driver injection') { |v| options[:virtio_path] = v }
     opts.on('--win-qemu-ga PATH', String) { |v| options[:qemu_ga_win] = v }
-    opts.on('--qemu-ga', 'Install qemu-guest-agent in Linux') { options[:qemu_ga_linux] = true }
+    opts.on('--qemu-ga', 'Install QEMU Guest Agent for Linux') { options[:qemu_ga_linux] = true }
     opts.on('--context-package PATH', String) { |v| options[:context] = v }
     opts.on('--skip-context', 'Skip OpenNebula contextualization package injection') { options[:skip_context] = true }
     opts.on('--context-min-free MB', Integer) { |v| options[:context_min_free] = v }
@@ -133,6 +139,9 @@ begin
     if options[:hyperv_connection].to_s.strip.empty? && options[:hyperv_host].to_s.strip.empty?
         raise 'provide --hyperv-connection ID (recommended) or direct --hyperv-host/--hyperv-identity/--hyperv-known-hosts options'
     end
+    unless options[:guest_os].to_s.empty? || %w[windows linux].include?(options[:guest_os].to_s)
+        raise '--guest-os must be windows or linux when supplied by the LayerSentry guest authority'
+    end
 
     validate_ids = lambda do |value, label, required|
         parts = value.to_s.split(',').map(&:strip).reject(&:empty?)
@@ -148,20 +157,21 @@ begin
     helper.instance_variable_set(:@client, OpenNebula::Client.new)
 
     if options[:hot]
-        phases = %i[preflight prepare commit cleanup finalize_success].select { |name| options[name] }
-        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --cleanup or --finalize-success' unless phases.length == 1
+        phases = %i[preflight prepare commit verify_source_off cleanup finalize_success].select { |name| options[name] }
+        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --verify-source-off, --cleanup or --finalize-success' unless phases.length == 1
         raise 'hot migration requires --operation-id' if options[:operation_id].to_s.strip.empty?
         result = case phases.first
                  when :preflight then helper.hyperv_hot_preflight(vm_name, options)
                  when :prepare then helper.hyperv_hot_prepare(vm_name, options)
                  when :commit then helper.hyperv_hot_commit(vm_name, options)
+                 when :verify_source_off then helper.hyperv_hot_verify_source_off(vm_name, options)
                  when :cleanup then helper.hyperv_hot_cleanup(vm_name, options)
                  when :finalize_success then helper.hyperv_hot_finalize_success(vm_name, options)
                  end
         puts JSON.generate(result.merge('source_platform' => 'hyperv', 'vm_name' => vm_name))
     else
-        if %i[preflight prepare commit cleanup finalize_success].any? { |name| options[name] }
-            raise '--preflight/--prepare/--commit/--cleanup/--finalize-success require --hot'
+        if %i[preflight prepare commit verify_source_off cleanup finalize_success].any? { |name| options[name] }
+            raise '--preflight/--prepare/--commit/--verify-source-off/--cleanup/--finalize-success require --hot'
         end
         template_id = helper.hyperv_convert(vm_name, options)
         puts JSON.generate({ :status => 'imported', :source_platform => 'hyperv', :vm_name => vm_name, :template_id => template_id })
