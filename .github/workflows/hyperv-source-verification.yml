@@ -13,6 +13,7 @@ on:
       - 'hyperv_import_recovery.rb'
       - 'hyperv_import_recovery_hardening.rb'
       - 'hyperv_virtio_hardening.rb'
+      - 'hyperv_final_safety_hardening.rb'
       - 'oneswap-hyperv'
       - 'install.sh'
       - 'docs/HYPERV.md'
@@ -24,6 +25,7 @@ on:
       - 'tests/hyperv_state_hardening_test.rb'
       - 'tests/hyperv_import_recovery_test.rb'
       - 'tests/hyperv_virtio_hardening_test.rb'
+      - 'tests/hyperv_final_safety_hardening_test.rb'
       - '.github/workflows/hyperv-source-verification.yml'
 
 permissions:
@@ -50,6 +52,7 @@ jobs:
           ruby -c hyperv_import_recovery.rb
           ruby -c hyperv_import_recovery_hardening.rb
           ruby -c hyperv_virtio_hardening.rb
+          ruby -c hyperv_final_safety_hardening.rb
           ruby -c oneswap-hyperv
       - name: Focused Hyper-V tests
         run: |
@@ -60,6 +63,7 @@ jobs:
           ruby -I. tests/hyperv_state_hardening_test.rb
           ruby -I. tests/hyperv_import_recovery_test.rb
           ruby -I. tests/hyperv_virtio_hardening_test.rb
+          ruby -I. tests/hyperv_final_safety_hardening_test.rb
       - name: Installer syntax
         run: bash -n install.sh
       - name: Security, recovery, source-off and VirtIO invariants
@@ -100,12 +104,18 @@ jobs:
           grep -q "agent-driven Hyper-V migration requires guest MAC evidence" hyperv_virtio_hardening.rb
           grep -q "explicit qualified --uefi-sec-path" hyperv_virtio_hardening.rb
           grep -q "MicrosoftUEFICertificateAuthority" tests/hyperv_virtio_hardening_test.rb
+          grep -q "virtio_win_artifact_digest" hyperv_final_safety_hardening.rb
+          grep -q "secure_uefi_artifact_digest" hyperv_final_safety_hardening.rb
+          grep -q "plain unauthenticated --http-transfer" hyperv_final_safety_hardening.rb
+          grep -q "source-platform marker mismatch" hyperv_final_safety_hardening.rb
+          grep -q "disk image-set mismatch" hyperv_final_safety_hardening.rb
           grep -q "hyperv_state_hardening.rb" install.sh
           grep -q "hyperv_source_security_hardening.rb" install.sh
           grep -q "hyperv_materialization_guard.rb" install.sh
           grep -q "hyperv_import_recovery.rb" install.sh
           grep -q "hyperv_import_recovery_hardening.rb" install.sh
           grep -q "hyperv_virtio_hardening.rb" install.sh
+          grep -q "hyperv_final_safety_hardening.rb" install.sh
           grep -q -- "--guest-os" oneswap-hyperv
           grep -q -- "--expected-guest-macs" oneswap-hyperv
           grep -q "guest agent MAC inventory does not match" hyperv_virtio_hardening.rb
