@@ -14,6 +14,7 @@ on:
       - 'hyperv_import_recovery_hardening.rb'
       - 'hyperv_virtio_hardening.rb'
       - 'hyperv_final_safety_hardening.rb'
+      - 'hyperv_network_hardening.rb'
       - 'oneswap-hyperv'
       - 'install.sh'
       - 'docs/HYPERV.md'
@@ -26,6 +27,7 @@ on:
       - 'tests/hyperv_import_recovery_test.rb'
       - 'tests/hyperv_virtio_hardening_test.rb'
       - 'tests/hyperv_final_safety_hardening_test.rb'
+      - 'tests/hyperv_network_hardening_test.rb'
       - '.github/workflows/hyperv-source-verification.yml'
 
 permissions:
@@ -53,6 +55,7 @@ jobs:
           ruby -c hyperv_import_recovery_hardening.rb
           ruby -c hyperv_virtio_hardening.rb
           ruby -c hyperv_final_safety_hardening.rb
+          ruby -c hyperv_network_hardening.rb
           ruby -c oneswap-hyperv
       - name: Focused Hyper-V tests
         run: |
@@ -64,9 +67,10 @@ jobs:
           ruby -I. tests/hyperv_import_recovery_test.rb
           ruby -I. tests/hyperv_virtio_hardening_test.rb
           ruby -I. tests/hyperv_final_safety_hardening_test.rb
+          ruby -I. tests/hyperv_network_hardening_test.rb
       - name: Installer syntax
         run: bash -n install.sh
-      - name: Security, recovery, source-off and VirtIO invariants
+      - name: Security, recovery, source-off, VirtIO and network invariants
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +113,12 @@ jobs:
           grep -q "plain unauthenticated --http-transfer" hyperv_final_safety_hardening.rb
           grep -q "source-platform marker mismatch" hyperv_final_safety_hardening.rb
           grep -q "disk image-set mismatch" hyperv_final_safety_hardening.rb
+          grep -q "agent-driven Hyper-V migration requires source MAC preservation" hyperv_network_hardening.rb
+          grep -q "guest_network_profile" hyperv_network_hardening.rb
+          grep -q -- "--mac" hyperv_network_hardening.rb
+          grep -q ":ip:" hyperv_network_hardening.rb
+          grep -q "hyperv_network_hardening.rb" install.sh
+          grep -q -- "--guest-network-profile" oneswap-hyperv
           grep -q "hyperv_state_hardening.rb" install.sh
           grep -q "hyperv_source_security_hardening.rb" install.sh
           grep -q "hyperv_materialization_guard.rb" install.sh
