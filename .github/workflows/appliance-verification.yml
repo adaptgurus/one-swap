@@ -50,4 +50,21 @@ jobs:
           grep -q 'must be a dedicated mounted filesystem' appliance/check-scratch.py
           grep -q 'ProtectSystem=strict' appliance/oneswapd.service
           grep -q 'CapabilityBoundingSet=' appliance/oneswapd.service
-          ! grep -REn '(password|secret|token)[[:space:]]*[:=][[:space:]]*["'"'][^"'"']+' appliance --exclude='source-profile.example.json'
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          pattern = re.compile(r'''(?i)(password|secret|token)\s*[:=]\s*["'][^"']+["']''')
+          offenders = []
+          for path in Path('appliance').rglob('*'):
+              if not path.is_file() or path.name == 'source-profile.example.json':
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              for number, line in enumerate(text.splitlines(), 1):
+                  if pattern.search(line):
+                      offenders.append(f'{path}:{number}:{line.strip()}')
+          if offenders:
+              raise SystemExit('hardcoded credential-like literal(s) found:\n' + '\n'.join(offenders))
+          PY
