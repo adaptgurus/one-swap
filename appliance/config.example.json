@@ -1,0 +1,19 @@
+{
+  "listen_host": "0.0.0.0",
+  "listen_port": 9443,
+  "tls_cert": "/etc/layersentry/oneswapd/tls/server.crt",
+  "tls_key": "/etc/layersentry/oneswapd/tls/server.key",
+  "client_ca": "/etc/layersentry/oneswapd/tls/client-ca.crt",
+  "allowed_client_common_names": ["layersentry-controller"],
+  "source_profiles_dir": "/etc/layersentry/oneswapd/sources",
+  "state_db": "/var/lib/layersentry-oneswap/state.db",
+  "scratch_root": "/var/cache/layersentry-oneswap",
+  "oneswap_binary": "/usr/bin/oneswap",
+  "hyperv_binary": "/usr/bin/oneswap-hyperv",
+  "virtio_win": "/usr/share/virtio-win/virtio-win.iso",
+  "qemu_ga_win": "/usr/share/virtio-win/virtio-win.iso",
+  "max_body_bytes": 1048576,
+  "max_workers": 4,
+  "execution_timeout_seconds": 86400,
+  "output_limit_bytes": 65536
+}
