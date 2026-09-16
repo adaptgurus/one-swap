@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
-import os
 import sys
 import tempfile
 import unittest
@@ -68,6 +67,7 @@ class ApplianceTests(unittest.TestCase):
 
     def base_request(self, platform="hyperv", source="hv-prod", guest_os="windows"):
         return {
+            "migration_operation_id": "migration-op-001",
             "tenant_id": "tenant-a", "source_connection_id": source,
             "source_platform": platform, "source_vm_name": "source-vm-01",
             "phase": "convert", "mode": "standard", "guest_os": guest_os,
@@ -92,17 +92,28 @@ class ApplianceTests(unittest.TestCase):
         self.assertIn("--qemu-ga", argv)
         self.assertNotIn("--virtio", argv)
 
-    def test_hyperv_delta_commit_adds_source_off_guard(self):
+    def test_hyperv_delta_commit_adds_source_off_guard_and_uses_migration_id(self):
         profile = self.install_profile()
         req = self.base_request()
         req.update({"phase": "delta_commit", "mode": "delta"})
-        commands = self.engine.build_commands("op-123", req, profile)
+        commands = self.engine.build_commands(req, profile)
         self.assertEqual(len(commands), 2)
         self.assertIn("--commit", commands[0])
         self.assertIn("--verify-source-off", commands[1])
-        self.assertIn("--operation-id", commands[0])
+        operation_index = commands[0].index("--operation-id")
+        self.assertEqual(commands[0][operation_index + 1], "migration-op-001")
         self.assertIn("--virtio", commands[0])
         self.assertIn("--win-qemu-ga", commands[0])
+
+    def test_phase_requests_can_have_distinct_api_ids_with_same_migration_id(self):
+        prepare = self.base_request()
+        prepare.update({"phase": "delta_prepare", "mode": "delta"})
+        commit = dict(prepare)
+        commit["phase"] = "delta_commit"
+        _, first_created = self.store.create_or_get("request-prepare", prepare)
+        _, second_created = self.store.create_or_get("request-commit", commit)
+        self.assertTrue(first_created and second_created)
+        self.assertEqual(prepare["migration_operation_id"], commit["migration_operation_id"])
 
     def test_unqualified_cloud_adapter_fails_closed(self):
         self.install_profile(platform="aws")
