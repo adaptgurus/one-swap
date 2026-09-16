@@ -1,0 +1,70 @@
+name: OneSwap Appliance Verification
+
+on:
+  pull_request:
+    paths:
+      - 'appliance/**'
+      - 'tests/oneswapd_test.py'
+      - '.github/workflows/appliance-verification.yml'
+  push:
+    branches:
+      - 'feat/layersentry-oneswap-appliance-*'
+
+permissions:
+  contents: read
+
+jobs:
+  appliance-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Python syntax
+        run: python3 -m py_compile appliance/oneswapd.py appliance/check-scratch.py tests/oneswapd_test.py
+      - name: Appliance unit tests
+        run: python3 -m unittest -v tests/oneswapd_test.py
+      - name: Shell syntax
+        run: bash -n appliance/install-appliance.sh appliance/build-qcow2.sh
+      - name: Systemd unit syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -D -m 0755 appliance/oneswapd.py /usr/libexec/layersentry/oneswapd
+          sudo install -D -m 0755 appliance/check-scratch.py /usr/libexec/layersentry/oneswap-scratch-check
+          sudo install -d -m 0700 /var/lib/layersentry-oneswap /var/cache/layersentry-oneswap /etc/layersentry/oneswapd /etc/one /usr/share/virtio-win
+          systemd-analyze verify appliance/oneswapd.service
+      - name: Security and packaging invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'TLSv1_3' appliance/oneswapd.py
+          grep -q 'CERT_REQUIRED' appliance/oneswapd.py
+          grep -q 'shell=False' appliance/oneswapd.py
+          grep -q 'mark_interrupted_unknown' appliance/oneswapd.py
+          grep -q -- '--virtio' appliance/oneswapd.py
+          grep -q -- '--win-qemu-ga' appliance/oneswapd.py
+          grep -q -- '--qemu-ga' appliance/oneswapd.py
+          grep -q -- '--verify-source-off' appliance/oneswapd.py
+          grep -q 'must be a dedicated mounted filesystem' appliance/check-scratch.py
+          grep -q 'ProtectSystem=strict' appliance/oneswapd.service
+          grep -q 'CapabilityBoundingSet=' appliance/oneswapd.service
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          pattern = re.compile(r'''(?i)(password|secret|token)\s*[:=]\s*["'][^"']+["']''')
+          offenders = []
+          for path in Path('appliance').rglob('*'):
+              if not path.is_file() or path.name == 'source-profile.example.json':
+                  continue
+              try:
+                  text = path.read_text(encoding='utf-8')
+              except UnicodeDecodeError:
+                  continue
+              for number, line in enumerate(text.splitlines(), 1):
+                  if pattern.search(line):
+                      offenders.append(f'{path}:{number}:{line.strip()}')
+          if offenders:
+              raise SystemExit('hardcoded credential-like literal(s) found:\n' + '\n'.join(offenders))
+          PY
