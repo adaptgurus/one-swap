@@ -2,14 +2,16 @@
 Description=LayerSentry OneSwap Migration Appliance Service
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/var/cache/layersentry-oneswap
 
 [Service]
 Type=simple
 User=oneswap
 Group=oneswap
 Environment=ONESWAPD_CONFIG=/etc/layersentry/oneswapd/config.json
-ExecStart=/usr/libexec/layersentry/oneswapd --config /etc/layersentry/oneswapd/config.json
+ExecStartPre=/usr/libexec/layersentry/oneswap-scratch-check /var/cache/layersentry-oneswap --min-free-gib 10
 ExecStartPre=/usr/libexec/layersentry/oneswapd --config /etc/layersentry/oneswapd/config.json --check
+ExecStart=/usr/libexec/layersentry/oneswapd --config /etc/layersentry/oneswapd/config.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
