@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ MODULE = Path(__file__).resolve().parents[1] / "appliance" / "oneswapd.py"
 spec = importlib.util.spec_from_file_location("oneswapd", MODULE)
 oneswapd = importlib.util.module_from_spec(spec)
 assert spec.loader
+sys.modules[spec.name] = oneswapd
 spec.loader.exec_module(oneswapd)
 
 
@@ -59,7 +61,9 @@ class ApplianceTests(unittest.TestCase):
             "http_transfer": True, "http_host": "10.0.0.50", "http_port": 29869,
         }
         name = oneswapd._atomic_profile_name(tenant, source)
-        (self.profiles / name).write_text(json.dumps(profile), encoding="utf-8")
+        profile_path = self.profiles / name
+        profile_path.write_text(json.dumps(profile), encoding="utf-8")
+        profile_path.chmod(0o600)
         return profile
 
     def base_request(self, platform="hyperv", source="hv-prod", guest_os="windows"):
