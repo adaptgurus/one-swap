@@ -1,0 +1,12 @@
+{
+  "tenant_id": "tenant-a",
+  "source_connection_id": "hv-prod",
+  "platform": "hyperv",
+  "one_auth": "/etc/layersentry/oneswapd/credentials/tenant-a.one_auth",
+  "one_xmlrpc": "https://opennebula.example.com:2633/RPC2",
+  "oneswap_config": "/etc/layersentry/oneswapd/source-configs/hv-prod.yaml",
+  "hyperv_connection": "hv-prod",
+  "http_transfer": true,
+  "http_host": "10.10.10.50",
+  "http_port": 29869
+}
