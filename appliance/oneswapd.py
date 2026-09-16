@@ -36,9 +36,10 @@ MUTATING_PHASES = {
     "finalize_success", "verify_source_off",
 }
 ALLOWED_REQUEST_KEYS = {
-    "tenant_id", "source_connection_id", "source_platform", "source_vm_name",
-    "phase", "mode", "guest_os", "expected_guest_macs",
-    "guest_network_profile", "target", "required_scratch_bytes",
+    "migration_operation_id", "tenant_id", "source_connection_id",
+    "source_platform", "source_vm_name", "phase", "mode", "guest_os",
+    "expected_guest_macs", "guest_network_profile", "target",
+    "required_scratch_bytes",
 }
 ALLOWED_TARGET_KEYS = {
     "datastore", "network", "one_cluster", "one_host", "one_sys_ds",
@@ -236,7 +237,8 @@ class Engine:
         path = Path(self.config.source_profiles_dir) / _atomic_profile_name(tenant, source)
         if not path.is_file():
             raise RequestError("registered source profile is not installed on appliance", HTTPStatus.NOT_FOUND)
-        profile = _read_json(path)
+        profile_path = Path(_safe_existing_file(path, "registered source profile", private=True))
+        profile = _read_json(profile_path)
         if profile.get("tenant_id") != tenant or profile.get("source_connection_id") != source:
             raise RequestError("source profile identity mismatch", HTTPStatus.CONFLICT)
         if profile.get("platform") != req["source_platform"]:
@@ -257,6 +259,7 @@ class Engine:
         if unknown:
             raise RequestError("unsupported request field(s): " + ",".join(sorted(unknown)))
         req = dict(raw)
+        req["migration_operation_id"] = _require_safe_id(req.get("migration_operation_id"), "migration_operation_id")
         req["tenant_id"] = _require_safe_id(req.get("tenant_id"), "tenant_id")
         req["source_connection_id"] = _require_safe_id(req.get("source_connection_id"), "source_connection_id")
         req["source_vm_name"] = _require_vm_name(req.get("source_vm_name"))
@@ -317,7 +320,7 @@ class Engine:
         self.store.set_state(operation_id, "RUNNING")
         try:
             profile = self.profile(req)
-            commands = self.build_commands(operation_id, req, profile)
+            commands = self.build_commands(req, profile)
             env = os.environ.copy()
             env.update({
                 "ONE_AUTH": profile["one_auth"],
@@ -344,26 +347,33 @@ class Engine:
             self.store.set_state(operation_id, "SUCCEEDED", last_code,
                                  self._cap("".join(all_out)), self._cap("".join(all_err)))
         except subprocess.TimeoutExpired as exc:
-            self.store.set_state(operation_id, "UNKNOWN", None, self._cap(exc.stdout or ""),
-                                 self._cap((exc.stderr or "") + "\nexecution timed out after dispatch"))
+            timeout_out = self._cap(exc.stdout or "")
+            timeout_err = self._cap(exc.stderr or "")
+            self.store.set_state(operation_id, "UNKNOWN", None, timeout_out,
+                                 self._cap(timeout_err + "\nexecution timed out after dispatch"))
         except Exception as exc:  # Fail closed; never fabricate a definitive result.
             self.store.set_state(operation_id, "UNKNOWN", None, "", self._cap(str(exc)))
 
-    def _cap(self, value: str) -> str:
-        encoded = value.encode("utf-8", errors="replace")
+    def _cap(self, value: str | bytes) -> str:
+        if isinstance(value, bytes):
+            text = value.decode("utf-8", errors="replace")
+        else:
+            text = str(value or "")
+        encoded = text.encode("utf-8", errors="replace")
         if len(encoded) <= self.config.output_limit_bytes:
-            return value
+            return text
         return encoded[-self.config.output_limit_bytes:].decode("utf-8", errors="replace")
 
-    def build_commands(self, operation_id: str, req: dict[str, Any], profile: dict[str, Any]) -> list[list[str]]:
+    def build_commands(self, req: dict[str, Any], profile: dict[str, Any]) -> list[list[str]]:
         if req["source_platform"] == "vmware":
             return [self._vmware_command(req, profile)]
-        command = self._hyperv_command(operation_id, req, profile)
+        migration_operation_id = req["migration_operation_id"]
+        command = self._hyperv_command(migration_operation_id, req, profile)
         commands = [command]
         if req["phase"] == "delta_commit":
             guard_req = dict(req)
             guard_req["phase"] = "verify_source_off"
-            commands.append(self._hyperv_command(operation_id, guard_req, profile))
+            commands.append(self._hyperv_command(migration_operation_id, guard_req, profile))
         return commands
 
     def _guest_args(self, req: dict[str, Any]) -> list[str]:
