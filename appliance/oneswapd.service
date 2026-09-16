@@ -1,0 +1,39 @@
+[Unit]
+Description=LayerSentry OneSwap Migration Appliance Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oneswap
+Group=oneswap
+Environment=ONESWAPD_CONFIG=/etc/layersentry/oneswapd/config.json
+ExecStart=/usr/libexec/layersentry/oneswapd --config /etc/layersentry/oneswapd/config.json
+ExecStartPre=/usr/libexec/layersentry/oneswapd --config /etc/layersentry/oneswapd/config.json --check
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/layersentry-oneswap /var/cache/layersentry-oneswap
+ReadOnlyPaths=/etc/layersentry/oneswapd /etc/one /usr/share/virtio-win /usr/lib/one /usr/bin
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
