@@ -22,7 +22,38 @@ command -v docker >/dev/null || { echo "docker is required to resolve the offlin
 command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 2; }
 
 bundle_dir="$WORK/bundle"
+resolver_script="$WORK/resolve-inside.sh"
 mkdir -p "$bundle_dir/debs"
+
+cat > "$resolver_script" <<'INSIDE'
+#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates gnupg wget apt-transport-https
+mkdir -p /etc/apt/keyrings
+wget -q -O- https://downloads.opennebula.io/repo/repo2.key | gpg --dearmor --yes --output /etc/apt/keyrings/opennebula.gpg
+printf '%s\n' "deb [signed-by=/etc/apt/keyrings/opennebula.gpg] https://downloads.opennebula.io/repo/${OPENNEBULA_RELEASE}/Debian/12 stable opennebula" > /etc/apt/sources.list.d/opennebula.list
+apt-get update
+apt-get install -y --no-install-recommends \
+  ca-certificates python3 openssh-client qemu-utils libguestfs-tools virt-v2v \
+  ovmf systemd-sysv gcc make opennebula-swap
+
+dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | LC_ALL=C sort > /bundle/resolved-installed.tsv
+cd /bundle/debs
+while IFS=$'\t' read -r package version architecture; do
+  apt-get download "${package}=${version}"
+done < /bundle/resolved-installed.tsv
+
+: > /bundle/packages.tsv
+for deb in /bundle/debs/*.deb; do
+  dpkg-deb -f "$deb" Package Version Architecture | paste -sd $'\t' - >> /bundle/packages.tsv
+done
+LC_ALL=C sort -u -o /bundle/packages.tsv /bundle/packages.tsv
+grep -Eq '^opennebula-swap[[:space:]]' /bundle/packages.tsv
+INSIDE
+chmod 0755 "$resolver_script"
 
 # Install the target toolchain inside the immutable resolver container, then
 # download every installed package at its exact version. This deliberately
@@ -32,31 +63,8 @@ mkdir -p "$bundle_dir/debs"
 docker run --rm \
   -e OPENNEBULA_RELEASE="$OPENNEBULA_RELEASE" \
   -v "$bundle_dir:/bundle" \
-  "$RESOLVER_IMAGE" /bin/bash -euo pipefail -c '
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends ca-certificates gnupg wget apt-transport-https
-    mkdir -p /etc/apt/keyrings
-    wget -q -O- https://downloads.opennebula.io/repo/repo2.key | gpg --dearmor --yes --output /etc/apt/keyrings/opennebula.gpg
-    printf "%s\n" "deb [signed-by=/etc/apt/keyrings/opennebula.gpg] https://downloads.opennebula.io/repo/${OPENNEBULA_RELEASE}/Debian/12 stable opennebula" > /etc/apt/sources.list.d/opennebula.list
-    apt-get update
-    apt-get install -y --no-install-recommends \
-      ca-certificates python3 openssh-client qemu-utils libguestfs-tools virt-v2v \
-      ovmf systemd-sysv gcc make opennebula-swap
-
-    dpkg-query -W -f="${binary:Package}\t${Version}\t${Architecture}\n" | LC_ALL=C sort > /bundle/resolved-installed.tsv
-    cd /bundle/debs
-    while IFS=$'\t' read -r package version architecture; do
-      apt-get download "${package}=${version}"
-    done < /bundle/resolved-installed.tsv
-
-    : > /bundle/packages.tsv
-    for deb in /bundle/debs/*.deb; do
-      dpkg-deb -f "$deb" Package Version Architecture | paste -sd "\t" - >> /bundle/packages.tsv
-    done
-    LC_ALL=C sort -u -o /bundle/packages.tsv /bundle/packages.tsv
-    grep -q $'"'"'^opennebula-swap\t'"'"' /bundle/packages.tsv
-  '
+  -v "$resolver_script:/resolve-inside.sh:ro" \
+  "$RESOLVER_IMAGE" /bin/bash /resolve-inside.sh
 
 (
   cd "$bundle_dir"
