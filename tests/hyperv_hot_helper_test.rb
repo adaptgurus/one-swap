@@ -87,4 +87,16 @@ class HyperVHotHelperTest < Minitest::Test
     assert_equal 'op:123-abc', OneSwapHyperV::HotUtil.operation_id!({operation_id:'op:123-abc'})
     assert_raises(OneSwapHyperV::Error){ OneSwapHyperV::HotUtil.operation_id!({operation_id:"bad\nvalue"}) }
   end
+  def test_preflight_inventory_reports_authoritative_disk_bytes_and_nic_count
+    coordinator=OneSwapHyperV::HotCoordinator.allocate
+    metadata=eligible
+    metadata['Disks'] << metadata['Disks'][0].merge('Path'=>'C:\VMs\data.vhdx','VirtualSize'=>8*1024*1024)
+    inventory=coordinator.source_inventory(metadata)
+    assert_equal 24*1024*1024, inventory['source_disk_bytes']
+    assert_equal 1, inventory['source_nic_count']
+    assert_equal 'Running', inventory['source_state']
+    assert_equal 2, inventory['generation']
+    assert_equal true, inventory['secure_boot']
+  end
+
 end

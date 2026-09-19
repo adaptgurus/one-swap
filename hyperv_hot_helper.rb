@@ -560,7 +560,20 @@ module OneSwapHyperV
             validate_local_prerequisites!
             metadata = @source.inspect(@vm_name, require_state: 'Running')
             validate_target_mapping!(metadata); validate_local_capacity!(metadata); validate_opennebula_targets!(metadata)
-            { 'status' => 'ELIGIBLE', 'operation_id' => @operation_id, 'source_vm_id' => metadata['VMId'], 'metadata_digest' => HotUtil.digest(stable_metadata(metadata)) }
+            { 'status' => 'ELIGIBLE', 'operation_id' => @operation_id, 'source_vm_id' => metadata['VMId'], 'metadata_digest' => HotUtil.digest(stable_metadata(metadata)) }.merge(source_inventory(metadata))
+        end
+
+        def source_inventory(metadata)
+            disks = Array(metadata['Disks'])
+            {
+                'source_disk_bytes' => disks.sum { |disk| Integer(disk['VirtualSize']) },
+                'source_nic_count' => Array(metadata['NICs']).length,
+                'source_state' => metadata['State'].to_s,
+                'generation' => Integer(metadata['Generation']),
+                'secure_boot' => Util.bool(metadata['SecureBoot'])
+            }
+        rescue ArgumentError, TypeError => e
+            raise Error, "invalid Hyper-V source inventory: #{e.message}"
         end
 
         def prepare
