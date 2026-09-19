@@ -60,6 +60,10 @@ jobs:
           test -n "$kernel"
           test -r "$kernel"
 
+          # Prove the hosted runner can launch the libguestfs appliance before
+          # rebuilding the immutable package closure.
+          libguestfs-test-tool 2>&1 | tee qualification/evidence/libguestfs-test-tool.txt
+
       - name: Fetch and verify immutable build inputs
         shell: bash
         run: |
