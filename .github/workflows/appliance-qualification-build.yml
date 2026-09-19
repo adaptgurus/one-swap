@@ -1,0 +1,127 @@
+name: OneSwap Qualification Image Build
+
+on:
+  push:
+    branches:
+      - 'qual/appliance-build-*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-appliance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout qualified OneSwap source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ad96c2e1cd102311b354649956f6ffe03f5d2559
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare build host
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils libguestfs-tools curl ca-certificates
+          mkdir -p build-inputs output evidence
+          df -h / | tee evidence/disk-before.txt
+          git rev-parse HEAD | tee evidence/oneswap-source-commit.txt
+          test "$(git rev-parse HEAD)" = "ad96c2e1cd102311b354649956f6ffe03f5d2559"
+
+      - name: Resolve and freeze external build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEBIAN_DIR='https://cloud.debian.org/images/cloud/bookworm/latest'
+          DEBIAN_FILE='debian-12-genericcloud-amd64.qcow2'
+          curl --fail --location --silent --show-error "$DEBIAN_DIR/SHA512SUMS" -o build-inputs/debian-SHA512SUMS
+          grep "  $DEBIAN_FILE$" build-inputs/debian-SHA512SUMS > build-inputs/debian-image.sha512
+          curl --fail --location --silent --show-error "$DEBIAN_DIR/$DEBIAN_FILE" -o "build-inputs/$DEBIAN_FILE"
+          (
+            cd build-inputs
+            sha512sum -c "$(basename debian-image.sha512)"
+          )
+          BASE_IMAGE_SHA256="$(sha256sum "build-inputs/$DEBIAN_FILE" | awk '{print $1}')"
+
+          VIRTIO_URL='https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso'
+          VIRTIO_EFFECTIVE_URL="$(curl --fail --location --silent --show-error -o build-inputs/virtio-win.iso -w '%{url_effective}' "$VIRTIO_URL")"
+          VIRTIO_WIN_SHA256="$(sha256sum build-inputs/virtio-win.iso | awk '{print $1}')"
+
+          docker pull debian:12
+          RESOLVER_IMAGE="$(docker image inspect debian:12 --format '{{index .RepoDigests 0}}')"
+          case "$RESOLVER_IMAGE" in
+            *@sha256:*) ;;
+            *) echo "resolver image was not resolved to an immutable digest" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "ONESWAP_COMMIT=ad96c2e1cd102311b354649956f6ffe03f5d2559"
+            echo "DEBIAN_SOURCE_URL=$DEBIAN_DIR/$DEBIAN_FILE"
+            echo "BASE_IMAGE_SHA256=$BASE_IMAGE_SHA256"
+            echo "VIRTIO_SOURCE_URL=$VIRTIO_EFFECTIVE_URL"
+            echo "VIRTIO_WIN_SHA256=$VIRTIO_WIN_SHA256"
+            echo "RESOLVER_IMAGE=$RESOLVER_IMAGE"
+          } | tee evidence/resolved-inputs.env
+
+          {
+            echo "BASE_IMAGE=$GITHUB_WORKSPACE/build-inputs/$DEBIAN_FILE"
+            echo "BASE_IMAGE_SHA256=$BASE_IMAGE_SHA256"
+            echo "VIRTIO_WIN_ISO=$GITHUB_WORKSPACE/build-inputs/virtio-win.iso"
+            echo "VIRTIO_WIN_SHA256=$VIRTIO_WIN_SHA256"
+            echo "RESOLVER_IMAGE=$RESOLVER_IMAGE"
+          } >> "$GITHUB_ENV"
+
+      - name: Freeze OpenNebula and OneSwap package closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          export OPENNEBULA_RELEASE=7.4.1
+          export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-packages-7.4.1.tar.gz"
+          export RESOLVER_IMAGE
+          ./appliance/prepare-offline-bundle.sh 2>&1 | tee evidence/offline-bundle-build.log
+          test -s "$OUTPUT"
+          test -s "$OUTPUT.sha256"
+          OFFLINE_BUNDLE_SHA256="$(awk '{print $1}' "$OUTPUT.sha256")"
+          echo "OFFLINE_BUNDLE=$OUTPUT" >> "$GITHUB_ENV"
+          echo "OFFLINE_BUNDLE_SHA256=$OFFLINE_BUNDLE_SHA256" >> "$GITHUB_ENV"
+          printf 'offline_bundle_sha256=%s\n' "$OFFLINE_BUNDLE_SHA256" | tee evidence/offline-bundle.sha256.txt
+
+      - name: Build offline qualification QCOW2
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          export OPENNEBULA_RELEASE=7.4.1
+          export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-7.4.1-ad96c2e1.qcow2"
+          export BASE_IMAGE BASE_IMAGE_SHA256 VIRTIO_WIN_ISO VIRTIO_WIN_SHA256 OFFLINE_BUNDLE OFFLINE_BUNDLE_SHA256
+          ./appliance/build-qcow2.sh 2>&1 | tee evidence/qcow2-build.log
+          test -s "$OUTPUT"
+          qemu-img check "$OUTPUT" | tee evidence/qemu-img-check.txt
+          qemu-img info "$OUTPUT" | tee evidence/qemu-img-info.txt
+          test -s "$OUTPUT.manifest.json"
+          test -s "$OUTPUT.sbom.tsv"
+          test -s "$OUTPUT.qualified-packages.tsv"
+          test -s "$OUTPUT.qualified-debs.sha256"
+          grep -q '"oneswap_commit":"ad96c2e1cd102311b354649956f6ffe03f5d2559"' "$OUTPUT.manifest.json"
+          grep -q $'^opennebula-swap\t' "$OUTPUT.qualified-packages.tsv"
+          awk -F '\t' 'NF != 3 {bad=1} END {exit bad}' "$OUTPUT.sbom.tsv"
+          wc -l "$OUTPUT.sbom.tsv" "$OUTPUT.qualified-packages.tsv" | tee evidence/package-counts.txt
+          sha256sum "$OUTPUT" "$OUTPUT.manifest.json" "$OUTPUT.sbom.tsv" "$OUTPUT.qualified-packages.tsv" "$OUTPUT.qualified-debs.sha256" | tee evidence/final-artifacts.sha256
+          df -h / | tee evidence/disk-after.txt
+
+      - name: Upload qualification image and evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: layersentry-oneswap-7.4.1-qualification-${{ github.run_id }}
+          path: |
+            output/
+            evidence/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: warn
