@@ -62,6 +62,11 @@ jobs:
           grep -q 'Packages Packages.gz' appliance/prepare-offline-bundle.sh
 
           grep -q -- '--no-network' appliance/build-qcow2.sh
+          grep -q 'virt-resize --expand /dev/sda1' appliance/build-qcow2.sh
+          if grep -Fq 'qemu-img resize "$OUTPUT"' appliance/build-qcow2.sh; then
+            echo 'QCOW2 builder must expand the guest root filesystem, not only virtual disk size'
+            exit 1
+          fi
           grep -Fq 'file:/opt/layersentry-build/packages ./' appliance/build-qcow2.sh
           grep -q 'Dir::Etc::sourcelist=/opt/layersentry-build/offline.list' appliance/build-qcow2.sh
           grep -q 'Dir::Etc::sourceparts=-' appliance/build-qcow2.sh
