@@ -412,6 +412,12 @@ CommandParser::CmdParser.new(ARGV) do
         :description => 'Estimate conversion time without creating snapshots, images, or templates.'
     }
 
+    INVENTORY_JSON = {
+        :name => 'inventory_json',
+        :large => '--inventory-json',
+        :description => 'Emit authoritative read-only source VM inventory as JSON and exit.'
+    }
+
     BENCHMARK_IMPORT = {
         :name => 'benchmark_import',
         :large => '--benchmark-import',
@@ -726,7 +732,7 @@ CommandParser::CmdParser.new(ARGV) do
     # already the short flag for --state above.
     LIST_OPTS    = [NAME, DATACENTER, CLUSTER, STATE, ACCEPT_CERT,
                     CLIHelper::EXPAND, CLIHelper::NO_EXPAND] + AUTH_OPTS + SHIFT_LIST_OPTS
-    CONVERT_OPTS = [NETWORK, NO_IP, NO_MAC, DATASTORE, CONTEXT, FALLBACK, CUSTOM, HYBRID, DOWNLOAD_STRIPES, DELTA, DELTA_PREPARE, DELTA_COMMIT, DELTA_CLEANUP, DRY_RUN, BENCHMARK_IMPORT, BENCHMARK_EXPORT, V2V_PATH, CONF_FILE, IMG_WAIT, DEV_PREFIX,
+    CONVERT_OPTS = [NETWORK, NO_IP, NO_MAC, DATASTORE, CONTEXT, FALLBACK, CUSTOM, HYBRID, DOWNLOAD_STRIPES, DELTA, DELTA_PREPARE, DELTA_COMMIT, DELTA_CLEANUP, DRY_RUN, INVENTORY_JSON, BENCHMARK_IMPORT, BENCHMARK_EXPORT, V2V_PATH, CONF_FILE, IMG_WAIT, DEV_PREFIX,
                     CPU_MODEL, GRAPHICS_TYPE, GRAPHICS_LISTEN, GRAPHICS_PORT, GRAPHICS_KEYMAP, GRAPHICS_PASSWORD, GRAPHICS_COMMAND, DISABLE_CONTEXTUALIZATION,
                     PERSISTENT_IMG, MEMORY_MAX, VCPU_MAX, CPU, VCPU, ONE_DS, ONE_DS_CLUSTER, ONE_CLUSTER, ONE_HOST, CLONE, REMOVE_VMTOOLS,
                     SKIP_PRECHEKS, UEFI_PATH, UEFI_SEC_PATH, INJECT_DNS, CONTEXT_MIN_FREE, CONTEXT_FAIL_LOW_SPACE, CONTEXT_TIMEOUT,
@@ -842,6 +848,13 @@ CommandParser::CmdParser.new(ARGV) do
 
             if (options[:download_stripes] || 1).to_i > 1 && !options[:hybrid]
                 raise '--download-stripes N > 1 requires --hybrid.'
+            end
+
+            if options[:inventory_json] && options[:shift]
+                raise '--inventory-json cannot be combined with --shift.'
+            end
+            if options[:inventory_json] && (options[:delta_prepare] || options[:delta_commit] || options[:delta_cleanup])
+                raise '--inventory-json cannot be combined with delta mutation phases.'
             end
 
             if (options[:delta_prepare] || options[:delta_commit] || options[:delta_cleanup]) && !options[:delta]

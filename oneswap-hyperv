@@ -41,6 +41,7 @@ parser = OptionParser.new do |opts|
     opts.separator ''
     opts.separator 'Migration mode:'
     opts.on('--hot', 'Warm/hot pre-copy using Hyper-V RCT with final source shutdown') { options[:hot] = true }
+    opts.on('--inventory', 'Read authoritative source VM inventory as JSON without migration or target mutation') { options[:inventory] = true }
     opts.on('--preflight', 'Validate hot migration without creating a reference point') { options[:preflight] = true }
     opts.on('--prepare', 'Create/export RCT reference point and build prepared RAW target disks') { options[:prepare] = true }
     opts.on('--commit', 'Revalidate, gracefully stop source VM, apply final RCT delta and import target') { options[:commit] = true }
@@ -149,11 +150,19 @@ begin
         parts.each { |part| raise "invalid #{label} ID #{part.inspect}" unless part.match?(/\A\d+\z/) }
         parts
     end
-    validate_ids.call(options[:datastore], 'OpenNebula image datastore', true)
+    validate_ids.call(options[:datastore], 'OpenNebula image datastore', !options[:inventory])
     validate_ids.call(options[:network], 'OpenNebula network', false)
     options[:http_port] ||= 29_869
 
     helper = OneSwapHelper.new
+    if options[:inventory]
+        conflicting = %i[hot preflight prepare commit verify_source_off cleanup finalize_success].select { |name| options[name] }
+        raise "--inventory cannot be combined with #{conflicting.map { |name| "--#{name.to_s.tr('_', '-')}" }.join(', ')}" unless conflicting.empty?
+        result = helper.hyperv_inventory(vm_name, options)
+        puts JSON.generate(result.merge('source_platform' => 'hyperv', 'source_vm_name' => vm_name))
+        exit 0
+    end
+
     helper.instance_variable_set(:@client, OpenNebula::Client.new)
 
     if options[:hot]

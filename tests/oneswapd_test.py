@@ -115,6 +115,41 @@ class ApplianceTests(unittest.TestCase):
         self.assertTrue(first_created and second_created)
         self.assertEqual(prepare["migration_operation_id"], commit["migration_operation_id"])
 
+    def test_inventory_is_read_only_profile_scoped_and_structured(self):
+        hv_profile = self.install_profile()
+        hv_req = {
+            "tenant_id": "tenant-a", "source_connection_id": "hv-prod",
+            "source_platform": "hyperv", "source_vm_name": "source-vm-01",
+        }
+        validated = self.engine.validate_inventory_request(hv_req)
+        hv_cmd = self.engine.build_inventory_command(validated, hv_profile)
+        self.assertIn("--inventory", hv_cmd)
+        self.assertNotIn("--prepare", hv_cmd)
+        self.assertNotIn("--commit", hv_cmd)
+
+        vmware_profile = self.install_profile(source="vc-prod", platform="vmware")
+        vmware_req = {
+            "tenant_id": "tenant-a", "source_connection_id": "vc-prod",
+            "source_platform": "vmware", "source_vm_name": "source-vm-02",
+        }
+        validated_vmware = self.engine.validate_inventory_request(vmware_req)
+        vmware_cmd = self.engine.build_inventory_command(validated_vmware, vmware_profile)
+        self.assertIn("--inventory-json", vmware_cmd)
+        self.assertNotIn("--dry-run", vmware_cmd)
+
+        parsed = self.engine._parse_inventory_output(
+            'diagnostic line\n{"source_vm_id":"vm-1","source_vm_state":"Running","source_disk_bytes":10737418240,"disk_count":2}',
+            hv_req,
+        )
+        self.assertEqual(parsed["source_disk_bytes"], 10737418240)
+        self.assertEqual(parsed["disk_count"], 2)
+        self.assertEqual(parsed["source_platform"], "hyperv")
+
+        bad = dict(hv_req)
+        bad["password"] = "must-never-be-accepted"
+        with self.assertRaises(oneswapd.RequestError):
+            self.engine.validate_inventory_request(bad)
+
     def test_unqualified_cloud_adapter_fails_closed(self):
         self.install_profile(platform="aws")
         req = self.base_request(platform="aws")
