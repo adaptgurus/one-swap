@@ -55,7 +55,9 @@ jobs:
           grep -q 'package="$(dpkg-deb -f "$deb" Package)"' appliance/prepare-offline-bundle.sh
           grep -q "awk -F '\\\\t' 'NF != 3" appliance/prepare-offline-bundle.sh
           grep -q -- '--no-network' appliance/build-qcow2.sh
-          grep -q -- '--no-download' appliance/build-qcow2.sh
+          grep -Fq 'dpkg --unpack /opt/layersentry-build/packages/debs/*.deb' appliance/build-qcow2.sh
+          grep -Fq 'dpkg --configure -a' appliance/build-qcow2.sh
+          grep -Fq 'test -z "$(dpkg --audit)"' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
           test -x appliance/build-qcow2.sh
           test -x appliance/prepare-offline-bundle.sh
