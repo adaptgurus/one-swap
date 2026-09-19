@@ -40,6 +40,7 @@ apt-get install -y --no-install-recommends \
   ca-certificates python3 openssh-client qemu-utils libguestfs-tools virt-v2v \
   ovmf systemd-sysv gcc make opennebula-swap
 
+# Freeze the exact target closure before installing resolver-only tooling.
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | LC_ALL=C sort > /bundle/resolved-installed.tsv
 cd /bundle/debs
 while IFS=$'\t' read -r package version architecture; do
@@ -57,14 +58,23 @@ done
 LC_ALL=C sort -u -o /bundle/packages.tsv /bundle/packages.tsv
 awk -F '\t' 'NF != 3 || $1 == "" || $2 == "" || $3 == "" { bad=1 } END { exit bad }' /bundle/packages.tsv
 grep -Eq '^opennebula-swap[[:space:]]' /bundle/packages.tsv
+
+# Build a deterministic local APT repository index. dpkg-dev is resolver-only:
+# it is installed after the production closure was frozen and is not copied
+# into the final appliance unless it was already part of that closure.
+apt-get install -y --no-install-recommends dpkg-dev
+cd /bundle
+dpkg-scanpackages --multiversion debs /dev/null > Packages
+gzip -n -9 -c Packages > Packages.gz
+test -s Packages
+grep -q '^Filename: debs/' Packages
 INSIDE
 chmod 0755 "$resolver_script"
 
 # Install the target toolchain inside the immutable resolver container, then
 # download every installed package at its exact version. This deliberately
-# over-captures the closure so the final guest build can run with networking
-# disabled and --no-download, without trusting the base image to provide a
-# dependency at an unspecified version.
+# over-captures the closure so the final guest can resolve dependencies from
+# a file:// APT repository while virt-customize networking is disabled.
 docker run --rm \
   -e OPENNEBULA_RELEASE="$OPENNEBULA_RELEASE" \
   -v "$bundle_dir:/bundle" \
@@ -74,9 +84,9 @@ docker run --rm \
 (
   cd "$bundle_dir"
   LC_ALL=C sha256sum debs/*.deb | LC_ALL=C sort > debs.sha256
-  printf 'schema=1\nopennebula_release=%s\nresolver_image=%s\n' "$OPENNEBULA_RELEASE" "$RESOLVER_IMAGE" > bundle.meta
+  printf 'schema=2\nopennebula_release=%s\nresolver_image=%s\n' "$OPENNEBULA_RELEASE" "$RESOLVER_IMAGE" > bundle.meta
   tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
-    -czf "$OUTPUT" bundle.meta packages.tsv resolved-installed.tsv debs.sha256 debs
+    -czf "$OUTPUT" bundle.meta packages.tsv resolved-installed.tsv Packages Packages.gz debs.sha256 debs
 )
 
 sha256sum "$OUTPUT" > "$OUTPUT.sha256"

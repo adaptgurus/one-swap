@@ -13,7 +13,7 @@ OUTPUT="${OUTPUT:-$PWD/layersentry-oneswap-${OPENNEBULA_RELEASE}.qcow2}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" log -1 --format=%ct)}"
 ONSWAP_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 
-for command in qemu-img virt-customize virt-cat sha256sum tar git; do
+for command in qemu-img virt-resize virt-customize virt-cat sha256sum tar git; do
     command -v "$command" >/dev/null || { echo "missing required build tool: $command" >&2; exit 2; }
 done
 
@@ -29,11 +29,13 @@ bundle_check="$work/bundle-check"
 mkdir -p "$bundle_check"
 
 tar -xzf "$OFFLINE_BUNDLE" -C "$bundle_check"
-for required in bundle.meta packages.tsv debs.sha256 debs; do
+for required in bundle.meta packages.tsv resolved-installed.tsv Packages Packages.gz debs.sha256 debs; do
     test -e "$bundle_check/$required" || { echo "offline bundle is missing $required" >&2; exit 3; }
 done
 grep -q $'^opennebula-swap\t' "$bundle_check/packages.tsv" || { echo "offline bundle does not contain opennebula-swap" >&2; exit 3; }
+grep -q '^schema=2$' "$bundle_check/bundle.meta" || { echo "offline bundle schema mismatch" >&2; exit 3; }
 grep -q "^opennebula_release=${OPENNEBULA_RELEASE}$" "$bundle_check/bundle.meta" || { echo "offline bundle OpenNebula release mismatch" >&2; exit 3; }
+grep -q '^Filename: debs/' "$bundle_check/Packages" || { echo "offline bundle APT index is invalid" >&2; exit 3; }
 (
     cd "$bundle_check"
     sha256sum -c debs.sha256
@@ -44,11 +46,16 @@ cat >"$manifest" <<EOF
 {"schema":2,"opennebula_release":"$OPENNEBULA_RELEASE","oneswap_commit":"$ONSWAP_COMMIT","base_image_sha256":"$BASE_IMAGE_SHA256","virtio_win_sha256":"$VIRTIO_WIN_SHA256","offline_bundle_sha256":"$OFFLINE_BUNDLE_SHA256","source_date_epoch":$SOURCE_DATE_EPOCH}
 EOF
 
-cp --reflink=auto "$BASE_IMAGE" "$OUTPUT"
-qemu-img resize "$OUTPUT" 32G >/dev/null
+# qemu-img resize changes only the virtual container size; it does not grow
+# the root partition/filesystem. Build a fresh 32 GiB destination and let
+# virt-resize expand the pinned Debian generic-cloud root partition.
+rm -f "$OUTPUT"
+qemu-img create -f qcow2 "$OUTPUT" 32G >/dev/null
+virt-resize --expand /dev/sda1 "$BASE_IMAGE" "$OUTPUT"
 
-# --no-network is intentional: all production package installation must come
-# from the immutable bundle whose digest is recorded above.
+# --no-network is intentional. Package resolution uses only the immutable
+# file:// APT repository embedded in OFFLINE_BUNDLE; all normal APT source
+# files and source-parts are excluded from both update and install.
 virt-customize --no-network -a "$OUTPUT" \
   --mkdir /opt/layersentry-build \
   --mkdir /usr/share/virtio-win \
@@ -59,7 +66,10 @@ virt-customize --no-network -a "$OUTPUT" \
   --run-command 'chmod 0644 /usr/share/virtio-win/virtio-win.iso' \
   --run-command 'mkdir -p /opt/layersentry-build/packages; tar -xzf /opt/layersentry-build/packages.tar.gz -C /opt/layersentry-build/packages' \
   --run-command 'cd /opt/layersentry-build/packages && sha256sum -c debs.sha256' \
-  --run-command 'export DEBIAN_FRONTEND=noninteractive; apt-get -y --no-download --no-install-recommends install /opt/layersentry-build/packages/debs/*.deb' \
+  --run-command 'printf "%s\n" "deb [trusted=yes] file:/opt/layersentry-build/packages ./" > /opt/layersentry-build/offline.list' \
+  --run-command 'export DEBIAN_FRONTEND=noninteractive; apt-get -o Dir::Etc::sourcelist=/opt/layersentry-build/offline.list -o Dir::Etc::sourceparts=- -o Acquire::Languages=none update' \
+  --run-command 'export DEBIAN_FRONTEND=noninteractive; set --; while IFS="$(printf "\t")" read -r package version architecture; do [ -n "$package" ] || continue; set -- "$@" "${package}=${version}"; done < /opt/layersentry-build/packages/resolved-installed.tsv; [ "$#" -gt 0 ]; apt-get -y --no-install-recommends --allow-downgrades -o Dir::Etc::sourcelist=/opt/layersentry-build/offline.list -o Dir::Etc::sourceparts=- -o Acquire::Languages=none install "$@"' \
+  --run-command 'dpkg --audit; apt-get -o Dir::Etc::sourcelist=/opt/layersentry-build/offline.list -o Dir::Etc::sourceparts=- check' \
   --run-command "dpkg-query -W -f='\${Version}\n' opennebula-swap | grep -E '^${OPENNEBULA_RELEASE}([.+~-]|$)'" \
   --run-command 'mkdir -p /opt/layersentry-build/src; tar -xzf /opt/layersentry-build/one-swap-source.tar.gz -C /opt/layersentry-build/src' \
   --run-command 'cd /opt/layersentry-build/src && make && ./install.sh && ./appliance/install-appliance.sh /opt/layersentry-build/src' \
@@ -68,7 +78,7 @@ virt-customize --no-network -a "$OUTPUT" \
   --run-command 'cp /opt/layersentry-build/packages/debs.sha256 /var/lib/layersentry-oneswap/qualified-debs.sha256' \
   --run-command "printf '%s\n' '$ONSWAP_COMMIT' > /var/lib/layersentry-oneswap/oneswap-commit" \
   --run-command 'dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n" | LC_ALL=C sort > /var/lib/layersentry-oneswap/sbom-packages.tsv' \
-  --run-command 'rm -rf /opt/layersentry-build/src /opt/layersentry-build/one-swap-source.tar.gz /opt/layersentry-build/packages /opt/layersentry-build/packages.tar.gz' \
+  --run-command 'rm -rf /opt/layersentry-build/src /opt/layersentry-build/one-swap-source.tar.gz /opt/layersentry-build/packages /opt/layersentry-build/packages.tar.gz; rm -f /opt/layersentry-build/offline.list' \
   --run-command 'rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*' \
   --run-command 'systemctl disable oneswapd.service || true' \
   --run-command 'cloud-init clean --logs --machine-id || true'

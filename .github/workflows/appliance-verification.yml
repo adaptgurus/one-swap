@@ -10,6 +10,7 @@ on:
     branches:
       - 'feat/layersentry-oneswap-appliance-*'
       - 'feat/appliance-reproducible-*'
+      - 'fix/appliance-offline-local-apt-*'
 
 permissions:
   contents: read
@@ -51,18 +52,34 @@ jobs:
           grep -q 'must be a dedicated mounted filesystem' appliance/check-scratch.py
           grep -q 'ProtectSystem=strict' appliance/oneswapd.service
           grep -q 'CapabilityBoundingSet=' appliance/oneswapd.service
+
           grep -q 'RESOLVER_IMAGE must be pinned by sha256 digest' appliance/prepare-offline-bundle.sh
           grep -q 'package="$(dpkg-deb -f "$deb" Package)"' appliance/prepare-offline-bundle.sh
           grep -q "awk -F '\\\\t' 'NF != 3" appliance/prepare-offline-bundle.sh
+          grep -q 'dpkg-scanpackages --multiversion debs /dev/null' appliance/prepare-offline-bundle.sh
+          grep -q 'gzip -n -9 -c Packages' appliance/prepare-offline-bundle.sh
+          grep -q "schema=2" appliance/prepare-offline-bundle.sh
+          grep -q 'Packages Packages.gz' appliance/prepare-offline-bundle.sh
+
           grep -q -- '--no-network' appliance/build-qcow2.sh
-          grep -q -- '--no-download' appliance/build-qcow2.sh
+          grep -q 'virt-resize --expand /dev/sda1' appliance/build-qcow2.sh
+          if grep -Fq 'qemu-img resize "$OUTPUT"' appliance/build-qcow2.sh; then
+            echo 'QCOW2 builder must expand the guest root filesystem, not only virtual disk size'
+            exit 1
+          fi
+          grep -Fq 'file:/opt/layersentry-build/packages ./' appliance/build-qcow2.sh
+          grep -q 'Dir::Etc::sourcelist=/opt/layersentry-build/offline.list' appliance/build-qcow2.sh
+          grep -q 'Dir::Etc::sourceparts=-' appliance/build-qcow2.sh
+          grep -q -- '--allow-downgrades' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
+          grep -q 'offline bundle schema mismatch' appliance/build-qcow2.sh
           test -x appliance/build-qcow2.sh
           test -x appliance/prepare-offline-bundle.sh
           test -x appliance/install-appliance.sh
           grep -Fq 'dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n"' appliance/build-qcow2.sh
-          if grep -Eq 'apt-get (update|install)|wget .*downloads\.opennebula' appliance/build-qcow2.sh; then
-            echo 'production QCOW2 builder must not resolve/download packages from repositories'
+
+          if grep -Eq 'https?://|(^|[[:space:]])(curl|wget)[[:space:]]' appliance/build-qcow2.sh; then
+            echo 'production QCOW2 builder must not use external package/network sources'
             exit 1
           fi
           python3 - <<'PY'
