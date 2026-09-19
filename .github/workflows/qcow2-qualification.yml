@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 3f2c4104ddf0d7d8e9fb4c1ef10c46489e6da671
+          ref: 4717b57f9994477d2e740573f36cbbace8ac7621
           persist-credentials: false
 
       - name: Install image build tools
