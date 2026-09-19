@@ -16,7 +16,7 @@ jobs:
       - name: Checkout qualified OneSwap source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ad96c2e1cd102311b354649956f6ffe03f5d2559
+          ref: 8079a72fcb023544d027c2f21e2b808c1028a875
           fetch-depth: 0
           persist-credentials: false
 
@@ -30,7 +30,7 @@ jobs:
           mkdir -p build-inputs output evidence
           df -h / | tee evidence/disk-before.txt
           git rev-parse HEAD | tee evidence/oneswap-source-commit.txt
-          test "$(git rev-parse HEAD)" = "ad96c2e1cd102311b354649956f6ffe03f5d2559"
+          test "$(git rev-parse HEAD)" = "8079a72fcb023544d027c2f21e2b808c1028a875"
 
       - name: Resolve and freeze external build inputs
         shell: bash
@@ -59,7 +59,7 @@ jobs:
           esac
 
           {
-            echo "ONESWAP_COMMIT=ad96c2e1cd102311b354649956f6ffe03f5d2559"
+            echo "ONESWAP_COMMIT=8079a72fcb023544d027c2f21e2b808c1028a875"
             echo "DEBIAN_SOURCE_URL=$DEBIAN_DIR/$DEBIAN_FILE"
             echo "BASE_IMAGE_SHA256=$BASE_IMAGE_SHA256"
             echo "VIRTIO_SOURCE_URL=$VIRTIO_EFFECTIVE_URL"
@@ -97,7 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           export OPENNEBULA_RELEASE=7.4.1
-          export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-7.4.1-ad96c2e1.qcow2"
+          export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-7.4.1-8079a72f.qcow2"
           export BASE_IMAGE BASE_IMAGE_SHA256 VIRTIO_WIN_ISO VIRTIO_WIN_SHA256 OFFLINE_BUNDLE OFFLINE_BUNDLE_SHA256
           bash ./appliance/build-qcow2.sh 2>&1 | tee evidence/qcow2-build.log
           test -s "$OUTPUT"
@@ -107,7 +107,7 @@ jobs:
           test -s "$OUTPUT.sbom.tsv"
           test -s "$OUTPUT.qualified-packages.tsv"
           test -s "$OUTPUT.qualified-debs.sha256"
-          grep -q '"oneswap_commit":"ad96c2e1cd102311b354649956f6ffe03f5d2559"' "$OUTPUT.manifest.json"
+          grep -q '"oneswap_commit":"8079a72fcb023544d027c2f21e2b808c1028a875"' "$OUTPUT.manifest.json"
           grep -q $'^opennebula-swap\t' "$OUTPUT.qualified-packages.tsv"
           awk -F '\t' 'NF != 3 {bad=1} END {exit bad}' "$OUTPUT.sbom.tsv"
           wc -l "$OUTPUT.sbom.tsv" "$OUTPUT.qualified-packages.tsv" | tee evidence/package-counts.txt
