@@ -1,0 +1,172 @@
+name: OneSwap QCOW2 Qualification
+# qualification-candidate: 1343afc179767b098d31bc09f8cfb0a7a08cf2de
+
+on:
+  push:
+    branches:
+      - 'qual/appliance-qcow2-*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-qcow2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 1343afc179767b098d31bc09f8cfb0a7a08cf2de
+          persist-credentials: false
+
+      - name: Install image build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils libguestfs-tools curl ca-certificates zstd
+          qemu-img --version
+          virt-customize --version
+          virt-cat --version
+          docker --version
+
+      - name: Prepare and verify libguestfs host
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          mkdir -p qualification/evidence
+          {
+            echo '=== kernel files before ==='
+            ls -l /boot/vmlinuz-* 2>&1 || true
+            echo '=== modules kernels before ==='
+            find /lib/modules -maxdepth 2 -type f -name 'vmlinuz*' -ls 2>&1 || true
+          } | tee qualification/evidence/libguestfs-host-before.txt
+
+          # Ubuntu commonly installs host kernels root-readable only. supermin runs
+          # as the unprivileged Actions runner and must be able to copy a kernel
+          # into its ephemeral appliance. This modifies only the disposable runner.
+          sudo find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -exec chmod a+r {} +
+          sudo find /lib/modules -maxdepth 2 -type f -name 'vmlinuz*' -exec chmod a+r {} +
+
+          {
+            echo '=== kernel files after ==='
+            ls -l /boot/vmlinuz-* 2>&1 || true
+            echo '=== modules kernels after ==='
+            find /lib/modules -maxdepth 2 -type f -name 'vmlinuz*' -ls 2>&1 || true
+          } | tee qualification/evidence/libguestfs-host-after.txt
+
+          kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -print -quit)"
+          test -n "$kernel"
+          test -r "$kernel"
+
+          # Prove the hosted runner can launch the libguestfs appliance before
+          # rebuilding the immutable package closure.
+          libguestfs-test-tool 2>&1 | tee qualification/evidence/libguestfs-test-tool.txt
+
+      - name: Fetch and verify immutable build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p qualification/inputs qualification/evidence
+          cd qualification/inputs
+
+          DEBIAN_BASE_URL='https://cloud.debian.org/images/cloud/bookworm/latest'
+          curl -fL --retry 4 --retry-delay 3 -o SHA512SUMS "$DEBIAN_BASE_URL/SHA512SUMS"
+          curl -fL --retry 4 --retry-delay 3 -o debian-12-genericcloud-amd64.qcow2 "$DEBIAN_BASE_URL/debian-12-genericcloud-amd64.qcow2"
+          grep ' debian-12-genericcloud-amd64.qcow2$' SHA512SUMS | sha512sum -c -
+          sha256sum debian-12-genericcloud-amd64.qcow2 | tee ../evidence/debian-base.sha256
+
+          VIRTIO_URL='https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso'
+          curl -fL --retry 4 --retry-delay 3 -w '%{url_effective}\n' -o virtio-win.iso "$VIRTIO_URL" | tee ../evidence/virtio-effective-url.txt
+          sha256sum virtio-win.iso | tee ../evidence/virtio-win.sha256
+
+          docker pull debian:12
+          RESOLVER_IMAGE="$(docker inspect --format '{{index .RepoDigests 0}}' debian:12)"
+          case "$RESOLVER_IMAGE" in
+            *@sha256:*) ;;
+            *) echo "resolver image was not digest pinned: $RESOLVER_IMAGE" >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$RESOLVER_IMAGE" | tee ../evidence/resolver-image.txt
+
+          {
+            printf 'oneswap_commit=%s\n' "$(git -C ../.. rev-parse HEAD)"
+            printf 'debian_base_url=%s\n' "$DEBIAN_BASE_URL/debian-12-genericcloud-amd64.qcow2"
+            printf 'virtio_source_url=%s\n' "$VIRTIO_URL"
+            printf 'resolver_image=%s\n' "$RESOLVER_IMAGE"
+          } | tee ../evidence/input-sources.txt
+
+      - name: Freeze exact offline package closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd qualification
+          RESOLVER_IMAGE="$(cat evidence/resolver-image.txt)"
+          RESOLVER_IMAGE="$RESOLVER_IMAGE" \
+          OPENNEBULA_RELEASE=7.4.1 \
+          OUTPUT="$PWD/layersentry-oneswap-packages-7.4.1.tar.gz" \
+            ../appliance/prepare-offline-bundle.sh 2>&1 | tee evidence/offline-bundle-build.txt
+          sha256sum layersentry-oneswap-packages-7.4.1.tar.gz | tee evidence/offline-bundle.sha256
+          tar -tzf layersentry-oneswap-packages-7.4.1.tar.gz | sed -n '1,80p' > evidence/offline-bundle-contents.txt
+
+      - name: Build offline QCOW2
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          cd qualification
+          BASE="$PWD/inputs/debian-12-genericcloud-amd64.qcow2"
+          VIRTIO="$PWD/inputs/virtio-win.iso"
+          BUNDLE="$PWD/layersentry-oneswap-packages-7.4.1.tar.gz"
+          BASE_SHA="$(sha256sum "$BASE" | awk '{print $1}')"
+          VIRTIO_SHA="$(sha256sum "$VIRTIO" | awk '{print $1}')"
+          BUNDLE_SHA="$(sha256sum "$BUNDLE" | awk '{print $1}')"
+          OUTPUT="$PWD/layersentry-oneswap-7.4.1.qcow2"
+
+          BASE_IMAGE="$BASE" BASE_IMAGE_SHA256="$BASE_SHA" \
+          VIRTIO_WIN_ISO="$VIRTIO" VIRTIO_WIN_SHA256="$VIRTIO_SHA" \
+          OFFLINE_BUNDLE="$BUNDLE" OFFLINE_BUNDLE_SHA256="$BUNDLE_SHA" \
+          OPENNEBULA_RELEASE=7.4.1 OUTPUT="$OUTPUT" \
+            ../appliance/build-qcow2.sh 2>&1 | tee evidence/qcow2-build.txt
+
+          qemu-img check "$OUTPUT" | tee evidence/qemu-img-check.txt
+          qemu-img info --output=json "$OUTPUT" | tee evidence/qemu-img-info.json
+          sha256sum "$OUTPUT" | tee evidence/final-image.sha256
+          cp "$OUTPUT.manifest.json" evidence/
+          cp "$OUTPUT.sbom.tsv" evidence/
+          cp "$OUTPUT.qualified-packages.tsv" evidence/
+          cp "$OUTPUT.qualified-debs.sha256" evidence/
+          test -s "$OUTPUT.sbom.tsv"
+          grep -q $'^opennebula-swap\t' "$OUTPUT.sbom.tsv"
+          grep -q '"oneswap_commit"' "$OUTPUT.manifest.json"
+
+      - name: Compress qualification image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd qualification
+          zstd -T0 -8 --rm layersentry-oneswap-7.4.1.qcow2 -o layersentry-oneswap-7.4.1.qcow2.zst
+          sha256sum layersentry-oneswap-7.4.1.qcow2.zst | tee evidence/final-image-compressed.sha256
+          du -h layersentry-oneswap-7.4.1.qcow2.zst | tee evidence/final-image-size.txt
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oneswap-qcow2-evidence-${{ github.run_id }}
+          path: qualification/evidence/
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload compressed QCOW2
+        if: success()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: layersentry-oneswap-7.4.1-qcow2-${{ github.run_id }}
+          path: qualification/layersentry-oneswap-7.4.1.qcow2.zst
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
