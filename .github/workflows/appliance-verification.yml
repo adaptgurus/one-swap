@@ -55,7 +55,8 @@ jobs:
           grep -q 'package="$(dpkg-deb -f "$deb" Package)"' appliance/prepare-offline-bundle.sh
           grep -q "awk -F '\\\\t' 'NF != 3" appliance/prepare-offline-bundle.sh
           grep -q -- '--no-network' appliance/build-qcow2.sh
-          grep -q -- '--no-download' appliance/build-qcow2.sh
+          grep -q 'dpkg --unpack /opt/layersentry-build/packages/debs/\*.deb' appliance/build-qcow2.sh
+          grep -q 'dpkg --configure -a' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
           grep -Fq 'dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n"' appliance/build-qcow2.sh
           if grep -Eq 'apt-get (update|install)|wget .*downloads\.opennebula' appliance/build-qcow2.sh; then
