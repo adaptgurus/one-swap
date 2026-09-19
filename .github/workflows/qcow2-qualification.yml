@@ -17,6 +17,7 @@ jobs:
         with:
           ref: 56884d0fde3a706aaee1777f51f3bbbef96e7e0b
           persist-credentials: false
+
       - name: Install image build tools
         shell: bash
         run: |
@@ -27,6 +28,38 @@ jobs:
           virt-customize --version
           virt-cat --version
           docker --version
+
+      - name: Prepare and verify libguestfs host
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          mkdir -p qualification/evidence
+          {
+            echo '=== kernel files before ==='
+            ls -l /boot/vmlinuz-* 2>&1 || true
+            echo '=== modules kernels before ==='
+            find /lib/modules -maxdepth 2 -type f -name 'vmlinuz*' -ls 2>&1 || true
+          } | tee qualification/evidence/libguestfs-host-before.txt
+
+          # Ubuntu commonly installs host kernels root-readable only. supermin runs
+          # as the unprivileged Actions runner and must be able to copy a kernel
+          # into its ephemeral appliance. This modifies only the disposable runner.
+          sudo find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -exec chmod a+r {} +
+          sudo find /lib/modules -maxdepth 2 -type f -name 'vmlinuz*' -exec chmod a+r {} +
+
+          {
+            echo '=== kernel files after ==='
+            ls -l /boot/vmlinuz-* 2>&1 || true
+            echo '=== modules kernels after ==='
+            find /lib/modules -maxdepth 2 -type f -name 'vmlinuz*' -ls 2>&1 || true
+          } | tee qualification/evidence/libguestfs-host-after.txt
+
+          kernel="$(find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -print -quit)"
+          test -n "$kernel"
+          test -r "$kernel"
+
       - name: Fetch and verify immutable build inputs
         shell: bash
         run: |
@@ -58,19 +91,26 @@ jobs:
             printf 'virtio_source_url=%s\n' "$VIRTIO_URL"
             printf 'resolver_image=%s\n' "$RESOLVER_IMAGE"
           } | tee ../evidence/input-sources.txt
+
       - name: Freeze exact offline package closure
         shell: bash
         run: |
           set -euo pipefail
           cd qualification
           RESOLVER_IMAGE="$(cat evidence/resolver-image.txt)"
-          RESOLVER_IMAGE="$RESOLVER_IMAGE"           OPENNEBULA_RELEASE=7.4.1           OUTPUT="$PWD/layersentry-oneswap-packages-7.4.1.tar.gz"             ../appliance/prepare-offline-bundle.sh | tee evidence/offline-bundle-build.txt
+          RESOLVER_IMAGE="$RESOLVER_IMAGE" \
+          OPENNEBULA_RELEASE=7.4.1 \
+          OUTPUT="$PWD/layersentry-oneswap-packages-7.4.1.tar.gz" \
+            ../appliance/prepare-offline-bundle.sh 2>&1 | tee evidence/offline-bundle-build.txt
           sha256sum layersentry-oneswap-packages-7.4.1.tar.gz | tee evidence/offline-bundle.sha256
           tar -tzf layersentry-oneswap-packages-7.4.1.tar.gz | sed -n '1,80p' > evidence/offline-bundle-contents.txt
+
       - name: Build offline QCOW2
         shell: bash
         env:
           LIBGUESTFS_BACKEND: direct
+          LIBGUESTFS_DEBUG: "1"
+          LIBGUESTFS_TRACE: "1"
         run: |
           set -euo pipefail
           cd qualification
@@ -82,7 +122,11 @@ jobs:
           BUNDLE_SHA="$(sha256sum "$BUNDLE" | awk '{print $1}')"
           OUTPUT="$PWD/layersentry-oneswap-7.4.1.qcow2"
 
-          BASE_IMAGE="$BASE" BASE_IMAGE_SHA256="$BASE_SHA"           VIRTIO_WIN_ISO="$VIRTIO" VIRTIO_WIN_SHA256="$VIRTIO_SHA"           OFFLINE_BUNDLE="$BUNDLE" OFFLINE_BUNDLE_SHA256="$BUNDLE_SHA"           OPENNEBULA_RELEASE=7.4.1 OUTPUT="$OUTPUT"             ../appliance/build-qcow2.sh | tee evidence/qcow2-build.txt
+          BASE_IMAGE="$BASE" BASE_IMAGE_SHA256="$BASE_SHA" \
+          VIRTIO_WIN_ISO="$VIRTIO" VIRTIO_WIN_SHA256="$VIRTIO_SHA" \
+          OFFLINE_BUNDLE="$BUNDLE" OFFLINE_BUNDLE_SHA256="$BUNDLE_SHA" \
+          OPENNEBULA_RELEASE=7.4.1 OUTPUT="$OUTPUT" \
+            ../appliance/build-qcow2.sh 2>&1 | tee evidence/qcow2-build.txt
 
           qemu-img check "$OUTPUT" | tee evidence/qemu-img-check.txt
           qemu-img info --output=json "$OUTPUT" | tee evidence/qemu-img-info.json
@@ -94,6 +138,7 @@ jobs:
           test -s "$OUTPUT.sbom.tsv"
           grep -q $'^opennebula-swap\t' "$OUTPUT.sbom.tsv"
           grep -q '"oneswap_commit"' "$OUTPUT.manifest.json"
+
       - name: Compress qualification image
         shell: bash
         run: |
@@ -102,6 +147,7 @@ jobs:
           zstd -T0 -8 --rm layersentry-oneswap-7.4.1.qcow2 -o layersentry-oneswap-7.4.1.qcow2.zst
           sha256sum layersentry-oneswap-7.4.1.qcow2.zst | tee evidence/final-image-compressed.sha256
           du -h layersentry-oneswap-7.4.1.qcow2.zst | tee evidence/final-image-size.txt
+
       - name: Upload qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -110,6 +156,7 @@ jobs:
           path: qualification/evidence/
           retention-days: 14
           if-no-files-found: error
+
       - name: Upload compressed QCOW2
         if: success()
         continue-on-error: true
