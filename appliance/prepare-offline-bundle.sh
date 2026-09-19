@@ -48,9 +48,14 @@ done < /bundle/resolved-installed.tsv
 
 : > /bundle/packages.tsv
 for deb in /bundle/debs/*.deb; do
-  dpkg-deb -f "$deb" Package Version Architecture | paste -sd $'\t' - >> /bundle/packages.tsv
+  package="$(dpkg-deb -f "$deb" Package)"
+  version="$(dpkg-deb -f "$deb" Version)"
+  architecture="$(dpkg-deb -f "$deb" Architecture)"
+  [[ -n "$package" && -n "$version" && -n "$architecture" ]]
+  printf '%s\t%s\t%s\n' "$package" "$version" "$architecture" >> /bundle/packages.tsv
 done
 LC_ALL=C sort -u -o /bundle/packages.tsv /bundle/packages.tsv
+awk -F '\t' 'NF != 3 || $1 == "" || $2 == "" || $3 == "" { bad=1 } END { exit bad }' /bundle/packages.tsv
 grep -Eq '^opennebula-swap[[:space:]]' /bundle/packages.tsv
 INSIDE
 chmod 0755 "$resolver_script"
