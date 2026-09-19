@@ -67,7 +67,7 @@ virt-customize --no-network -a "$OUTPUT" \
   --run-command 'cp /opt/layersentry-build/packages/packages.tsv /var/lib/layersentry-oneswap/qualified-packages.tsv' \
   --run-command 'cp /opt/layersentry-build/packages/debs.sha256 /var/lib/layersentry-oneswap/qualified-debs.sha256' \
   --run-command "printf '%s\n' '$ONSWAP_COMMIT' > /var/lib/layersentry-oneswap/oneswap-commit" \
-  --run-command 'dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n" | LC_ALL=C sort > /var/lib/layersentry-oneswap/sbom-packages.tsv' \
+  --run-command 'dpkg-query -W -f="\${Package}\t\${Version}\t\${Architecture}\n" | LC_ALL=C sort > /var/lib/layersentry-oneswap/sbom-packages.tsv' \
   --run-command 'rm -rf /opt/layersentry-build/src /opt/layersentry-build/one-swap-source.tar.gz /opt/layersentry-build/packages /opt/layersentry-build/packages.tar.gz' \
   --run-command 'rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*' \
   --run-command 'systemctl disable oneswapd.service || true' \
