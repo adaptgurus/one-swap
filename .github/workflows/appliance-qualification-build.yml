@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-appliance:
@@ -26,8 +27,10 @@ jobs:
           set -euo pipefail
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup || true
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-utils libguestfs-tools curl ca-certificates
+          sudo apt-get install -y --no-install-recommends qemu-utils libguestfs-tools curl ca-certificates unzip
+          sudo chmod a+r /boot/vmlinuz-* 2>/dev/null || true
           mkdir -p build-inputs output evidence
+          LIBGUESTFS_BACKEND=direct libguestfs-test-tool > evidence/libguestfs-test-tool.txt 2>&1
           df -h / | tee evidence/disk-before.txt
           git rev-parse HEAD | tee evidence/oneswap-source-commit.txt
           test "$(git rev-parse HEAD)" = "8079a72fcb023544d027c2f21e2b808c1028a875"
@@ -75,20 +78,30 @@ jobs:
             echo "RESOLVER_IMAGE=$RESOLVER_IMAGE"
           } >> "$GITHUB_ENV"
 
-      - name: Freeze OpenNebula and OneSwap package closure
+      - name: Reuse exact qualified offline package closure
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          export OPENNEBULA_RELEASE=7.4.1
-          export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-packages-7.4.1.tar.gz"
-          export RESOLVER_IMAGE
-          bash ./appliance/prepare-offline-bundle.sh 2>&1 | tee evidence/offline-bundle-build.log
-          test -s "$OUTPUT"
-          test -s "$OUTPUT.sha256"
-          OFFLINE_BUNDLE_SHA256="$(awk '{print $1}' "$OUTPUT.sha256")"
-          echo "OFFLINE_BUNDLE=$OUTPUT" >> "$GITHUB_ENV"
-          echo "OFFLINE_BUNDLE_SHA256=$OFFLINE_BUNDLE_SHA256" >> "$GITHUB_ENV"
-          printf 'offline_bundle_sha256=%s\n' "$OFFLINE_BUNDLE_SHA256" | tee evidence/offline-bundle.sha256.txt
+          ARTIFACT_ID=10584277720
+          curl --fail --location --silent --show-error \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/adaptgurus/one-swap/actions/artifacts/$ARTIFACT_ID/zip" \
+            -o /tmp/prior-qualification.zip
+          unzip -j /tmp/prior-qualification.zip \
+            'output/layersentry-oneswap-packages-7.4.1.tar.gz*' -d output
+          OFFLINE_BUNDLE="$GITHUB_WORKSPACE/output/layersentry-oneswap-packages-7.4.1.tar.gz"
+          test -s "$OFFLINE_BUNDLE"
+          test -s "$OFFLINE_BUNDLE.sha256"
+          expected="$(awk '{print $1}' "$OFFLINE_BUNDLE.sha256")"
+          actual="$(sha256sum "$OFFLINE_BUNDLE" | awk '{print $1}')"
+          test "$actual" = "$expected"
+          echo "OFFLINE_BUNDLE=$OFFLINE_BUNDLE" >> "$GITHUB_ENV"
+          echo "OFFLINE_BUNDLE_SHA256=$actual" >> "$GITHUB_ENV"
+          printf 'offline_bundle_artifact_id=%s\noffline_bundle_sha256=%s\n' "$ARTIFACT_ID" "$actual" | tee evidence/offline-bundle-reuse.txt
 
       - name: Build offline qualification QCOW2
         shell: bash
