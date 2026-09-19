@@ -55,7 +55,15 @@ jobs:
           grep -q 'package="$(dpkg-deb -f "$deb" Package)"' appliance/prepare-offline-bundle.sh
           grep -q "awk -F '\\\\t' 'NF != 3" appliance/prepare-offline-bundle.sh
           grep -q -- '--no-network' appliance/build-qcow2.sh
-          grep -q -- '--no-download' appliance/build-qcow2.sh
+          grep -Fq 'qemu-img create -f qcow2 "$OUTPUT" 32G' appliance/build-qcow2.sh
+          grep -Fq 'virt-resize --expand "$root_partition" "$BASE_IMAGE" "$OUTPUT"' appliance/build-qcow2.sh
+          if grep -Fq 'qemu-img resize "$OUTPUT" 32G' appliance/build-qcow2.sh; then
+            echo 'production QCOW2 builder must grow the guest filesystem, not only the virtual disk container'
+            exit 1
+          fi
+          grep -Fq 'dpkg --unpack /opt/layersentry-build/packages/debs/*.deb' appliance/build-qcow2.sh
+          grep -Fq 'dpkg --configure -a' appliance/build-qcow2.sh
+          grep -Fq 'test -z "$(dpkg --audit)"' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
           test -x appliance/build-qcow2.sh
           test -x appliance/prepare-offline-bundle.sh
