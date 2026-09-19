@@ -13,7 +13,7 @@ OUTPUT="${OUTPUT:-$PWD/layersentry-oneswap-${OPENNEBULA_RELEASE}.qcow2}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" log -1 --format=%ct)}"
 ONSWAP_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 
-for command in qemu-img virt-customize virt-cat sha256sum tar git; do
+for command in qemu-img virt-resize virt-customize virt-cat sha256sum tar git; do
     command -v "$command" >/dev/null || { echo "missing required build tool: $command" >&2; exit 2; }
 done
 
@@ -46,8 +46,12 @@ cat >"$manifest" <<EOF
 {"schema":2,"opennebula_release":"$OPENNEBULA_RELEASE","oneswap_commit":"$ONSWAP_COMMIT","base_image_sha256":"$BASE_IMAGE_SHA256","virtio_win_sha256":"$VIRTIO_WIN_SHA256","offline_bundle_sha256":"$OFFLINE_BUNDLE_SHA256","source_date_epoch":$SOURCE_DATE_EPOCH}
 EOF
 
-cp --reflink=auto "$BASE_IMAGE" "$OUTPUT"
-qemu-img resize "$OUTPUT" 32G >/dev/null
+# qemu-img resize changes only the virtual container size; it does not grow
+# the root partition/filesystem. Build a fresh 32 GiB destination and let
+# virt-resize expand the pinned Debian generic-cloud root partition.
+rm -f "$OUTPUT"
+qemu-img create -f qcow2 "$OUTPUT" 32G >/dev/null
+virt-resize --expand /dev/sda1 "$BASE_IMAGE" "$OUTPUT"
 
 # --no-network is intentional. Package resolution uses only the immutable
 # file:// APT repository embedded in OFFLINE_BUNDLE; all normal APT source
