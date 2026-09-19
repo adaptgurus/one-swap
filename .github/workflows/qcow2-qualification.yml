@@ -114,8 +114,6 @@ jobs:
         shell: bash
         env:
           LIBGUESTFS_BACKEND: direct
-          LIBGUESTFS_DEBUG: "1"
-          LIBGUESTFS_TRACE: "1"
         run: |
           set -euo pipefail
           cd qualification
