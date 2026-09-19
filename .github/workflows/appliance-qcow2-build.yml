@@ -1,0 +1,157 @@
+name: Build LayerSentry OneSwap QCOW2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'feat/appliance-qcow2-build-*'
+    paths:
+      - '.github/workflows/appliance-qcow2-build.yml'
+      - 'appliance/**'
+      - 'oneswap*'
+      - 'hyperv_*.rb'
+      - 'Makefile'
+      - 'install.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  build-qcow2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      OPENNEBULA_RELEASE: '7.4.1'
+      DEBIAN_BUILD: '20260909-2596'
+      DEBIAN_IMAGE: 'debian-12-genericcloud-amd64-20260909-2596.qcow2'
+      DEBIAN_SHA512: '08fea112563461f251f3c95a5c5cf8cb25eb60f74cec03e85a97ff91d3efef3059d35837598bbb476008f20db6d3bdc7143c5f2f2a9a6da394a0acc601fd5986'
+      RESOLVER_IMAGE: 'debian:bookworm-20260824@sha256:2f65600e1252c5649d2213e1d1ea4d74253d26514dc6530102a875e429245929'
+      VIRTIO_VERSION: '0.1.302'
+      VIRTIO_RELEASE: '0.1.302-1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install image build tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl qemu-utils libguestfs-tools zstd jq ca-certificates
+          qemu-img --version
+          virt-customize --version
+          docker --version
+
+      - name: Fetch and qualify immutable build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-inputs
+          debian_url="https://cloudfront.debian.net/cdimage/cloud/bookworm/${DEBIAN_BUILD}/${DEBIAN_IMAGE}"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            -o "build-inputs/${DEBIAN_IMAGE}" "${debian_url}"
+          printf '%s  %s\n' "${DEBIAN_SHA512}" "build-inputs/${DEBIAN_IMAGE}" | sha512sum -c -
+
+          fedora_url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-${VIRTIO_RELEASE}/virtio-win-${VIRTIO_VERSION}.iso"
+          mirror_url="https://fedora-virt.repo.nfrance.com/virtio-win/direct-downloads/stable-virtio/virtio-win-${VIRTIO_VERSION}.iso"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            -o "build-inputs/virtio-win-${VIRTIO_VERSION}.iso" "${fedora_url}"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --proto '=https' --tlsv1.2 \
+            -o "build-inputs/virtio-win-${VIRTIO_VERSION}.mirror.iso" "${mirror_url}"
+          cmp "build-inputs/virtio-win-${VIRTIO_VERSION}.iso" "build-inputs/virtio-win-${VIRTIO_VERSION}.mirror.iso"
+          rm "build-inputs/virtio-win-${VIRTIO_VERSION}.mirror.iso"
+
+          docker pull "${RESOLVER_IMAGE}"
+          debian_sha256="$(sha256sum "build-inputs/${DEBIAN_IMAGE}" | awk '{print $1}')"
+          virtio_sha256="$(sha256sum "build-inputs/virtio-win-${VIRTIO_VERSION}.iso" | awk '{print $1}')"
+          {
+            printf 'debian_url=%s\n' "${debian_url}"
+            printf 'debian_sha512=%s\n' "${DEBIAN_SHA512}"
+            printf 'debian_sha256=%s\n' "${debian_sha256}"
+            printf 'virtio_fedora_url=%s\n' "${fedora_url}"
+            printf 'virtio_mirror_url=%s\n' "${mirror_url}"
+            printf 'virtio_sha256=%s\n' "${virtio_sha256}"
+            printf 'resolver_image=%s\n' "${RESOLVER_IMAGE}"
+          } | tee build-inputs/input-digests.txt
+          printf 'DEBIAN_SHA256=%s\n' "${debian_sha256}" >> "${GITHUB_ENV}"
+          printf 'VIRTIO_SHA256=%s\n' "${virtio_sha256}" >> "${GITHUB_ENV}"
+
+      - name: Resolve immutable OpenNebula and conversion package closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTPUT="${PWD}/build-inputs/layersentry-oneswap-packages-${OPENNEBULA_RELEASE}.tar.gz" \
+          RESOLVER_IMAGE="${RESOLVER_IMAGE}" \
+          OPENNEBULA_RELEASE="${OPENNEBULA_RELEASE}" \
+            ./appliance/prepare-offline-bundle.sh
+          bundle="build-inputs/layersentry-oneswap-packages-${OPENNEBULA_RELEASE}.tar.gz"
+          sha256sum "${bundle}" | tee "${bundle}.sha256"
+          printf 'OFFLINE_BUNDLE_SHA256=%s\n' "$(sha256sum "${bundle}" | awk '{print $1}')" >> "${GITHUB_ENV}"
+
+      - name: Build final appliance with networking disabled
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          output="${PWD}/layersentry-oneswap-${OPENNEBULA_RELEASE}.qcow2"
+          BASE_IMAGE="${PWD}/build-inputs/${DEBIAN_IMAGE}" \
+          BASE_IMAGE_SHA256="${DEBIAN_SHA256}" \
+          VIRTIO_WIN_ISO="${PWD}/build-inputs/virtio-win-${VIRTIO_VERSION}.iso" \
+          VIRTIO_WIN_SHA256="${VIRTIO_SHA256}" \
+          OFFLINE_BUNDLE="${PWD}/build-inputs/layersentry-oneswap-packages-${OPENNEBULA_RELEASE}.tar.gz" \
+          OFFLINE_BUNDLE_SHA256="${OFFLINE_BUNDLE_SHA256}" \
+          OPENNEBULA_RELEASE="${OPENNEBULA_RELEASE}" \
+          OUTPUT="${output}" \
+            ./appliance/build-qcow2.sh
+
+      - name: Verify built appliance evidence
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          image="layersentry-oneswap-${OPENNEBULA_RELEASE}.qcow2"
+          qemu-img check "${image}"
+          qemu-img info --output=json "${image}" | jq -e '.format == "qcow2" and ."virtual-size" >= 34359738368'
+          jq -e --arg commit "$(git rev-parse HEAD)" \
+            '.schema == 2 and .oneswap_commit == $commit and .opennebula_release == "7.4.1"' \
+            "${image}.manifest.json"
+          grep -Eq '^opennebula-swap[[:space:]]' "${image}.qualified-packages.tsv"
+          test -s "${image}.sbom.tsv"
+          test -s "${image}.qualified-debs.sha256"
+          sha256sum -c "${image}.sha256"
+          cat "${image}.manifest.json"
+          cat build-inputs/input-digests.txt
+
+      - name: Compress appliance for transfer
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="layersentry-oneswap-${OPENNEBULA_RELEASE}.qcow2"
+          zstd -T0 -10 --sparse "${image}" -o "${image}.zst"
+          sha256sum "${image}.zst" > "${image}.zst.sha256"
+
+      - name: Upload QCOW2 qualification artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: layersentry-oneswap-7.4.1-qcow2
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            layersentry-oneswap-7.4.1.qcow2.zst
+            layersentry-oneswap-7.4.1.qcow2.zst.sha256
+            layersentry-oneswap-7.4.1.qcow2.sha256
+            layersentry-oneswap-7.4.1.qcow2.manifest.json
+            layersentry-oneswap-7.4.1.qcow2.sbom.tsv
+            layersentry-oneswap-7.4.1.qcow2.qualified-packages.tsv
+            layersentry-oneswap-7.4.1.qcow2.qualified-debs.sha256
+            build-inputs/input-digests.txt
+            build-inputs/layersentry-oneswap-packages-7.4.1.tar.gz.sha256
