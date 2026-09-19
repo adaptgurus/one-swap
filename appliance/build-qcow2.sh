@@ -59,7 +59,7 @@ virt-customize --no-network -a "$OUTPUT" \
   --run-command 'chmod 0644 /usr/share/virtio-win/virtio-win.iso' \
   --run-command 'mkdir -p /opt/layersentry-build/packages; tar -xzf /opt/layersentry-build/packages.tar.gz -C /opt/layersentry-build/packages' \
   --run-command 'cd /opt/layersentry-build/packages && sha256sum -c debs.sha256' \
-  --run-command 'export DEBIAN_FRONTEND=noninteractive; apt-get -y --no-download --no-install-recommends install /opt/layersentry-build/packages/debs/*.deb' \
+  --run-command 'export DEBIAN_FRONTEND=noninteractive; dpkg --unpack /opt/layersentry-build/packages/debs/*.deb; dpkg --configure -a; test -z "$(dpkg --audit)"' \
   --run-command "dpkg-query -W -f='\${Version}\n' opennebula-swap | grep -E '^${OPENNEBULA_RELEASE}([.+~-]|$)'" \
   --run-command 'mkdir -p /opt/layersentry-build/src; tar -xzf /opt/layersentry-build/one-swap-source.tar.gz -C /opt/layersentry-build/src' \
   --run-command 'cd /opt/layersentry-build/src && make && ./install.sh && ./appliance/install-appliance.sh /opt/layersentry-build/src' \
