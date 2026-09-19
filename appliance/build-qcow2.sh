@@ -13,7 +13,7 @@ OUTPUT="${OUTPUT:-$PWD/layersentry-oneswap-${OPENNEBULA_RELEASE}.qcow2}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" log -1 --format=%ct)}"
 ONSWAP_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 
-for command in qemu-img virt-customize virt-cat sha256sum tar git; do
+for command in qemu-img virt-resize virt-customize virt-cat sha256sum tar git; do
     command -v "$command" >/dev/null || { echo "missing required build tool: $command" >&2; exit 2; }
 done
 
@@ -44,8 +44,14 @@ cat >"$manifest" <<EOF
 {"schema":2,"opennebula_release":"$OPENNEBULA_RELEASE","oneswap_commit":"$ONSWAP_COMMIT","base_image_sha256":"$BASE_IMAGE_SHA256","virtio_win_sha256":"$VIRTIO_WIN_SHA256","offline_bundle_sha256":"$OFFLINE_BUNDLE_SHA256","source_date_epoch":$SOURCE_DATE_EPOCH}
 EOF
 
-cp --reflink=auto "$BASE_IMAGE" "$OUTPUT"
-qemu-img resize "$OUTPUT" 32G >/dev/null
+root_partition="${ROOT_PARTITION:-/dev/sda1}"
+rm -f "$OUTPUT"
+qemu-img create -f qcow2 "$OUTPUT" 32G >/dev/null
+# Expanding only the QCOW2 virtual size leaves the Debian root filesystem at
+# its original cloud-image size. Copy and grow the known Debian 12 root
+# partition before uploading the offline package closure so the build cannot
+# exhaust the guest filesystem while the backing image still has free space.
+virt-resize --expand "$root_partition" "$BASE_IMAGE" "$OUTPUT"
 
 # --no-network is intentional: all production package installation must come
 # from the immutable bundle whose digest is recorded above.
