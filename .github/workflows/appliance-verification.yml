@@ -55,6 +55,7 @@ jobs:
           grep -q -- '--no-network' appliance/build-qcow2.sh
           grep -q -- '--no-download' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
+          grep -Fq 'dpkg-query -W -f="\\${Package}\\t\\${Version}\\t\\${Architecture}\\n"' appliance/build-qcow2.sh
           if grep -Eq 'apt-get (update|install)|wget .*downloads\.opennebula' appliance/build-qcow2.sh; then
             echo 'production QCOW2 builder must not resolve/download packages from repositories'
             exit 1
