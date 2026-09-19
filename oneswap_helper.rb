@@ -4474,6 +4474,22 @@ GUESTFISH
         end
 
         @props = vm.to_hash
+
+        if @options[:inventory_json]
+            disks = dry_run_disk_metadata
+            raise "vCenter reports no virtual disks for #{@options[:name]}" if disks.empty?
+            source_disk_bytes = disks.sum { |disk| (disk[:provisioned_mib].to_f * 1024 * 1024).round }
+            raise "vCenter returned invalid provisioned disk capacity for #{@options[:name]}" unless source_disk_bytes.positive?
+            inventory = {
+                'source_vm_id' => @props['config'][:uuid].to_s,
+                'source_vm_state' => @props['summary.runtime.powerState'].to_s,
+                'source_disk_bytes' => source_disk_bytes,
+                'disk_count' => disks.length
+            }
+            puts JSON.generate(inventory)
+            return inventory
+        end
+
         validate_vsan_conversion!
 
         if @options[:dry_run]

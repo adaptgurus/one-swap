@@ -217,6 +217,49 @@ module OneSwapHyperV
             @transport = transport
         end
 
+        def inventory(vm_name)
+            name64 = Base64.strict_encode64(Util.require_text(vm_name, 'Hyper-V VM name').encode(Encoding::UTF_8))
+            script = <<~POWERSHELL
+                $ErrorActionPreference = 'Stop'
+                $ProgressPreference = 'SilentlyContinue'
+                $WarningPreference = 'SilentlyContinue'
+                [Console]::OutputEncoding = [Text.Encoding]::UTF8
+                $name = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{name64}'))
+                $vm = Get-VM -Name $name -ErrorAction Stop
+                $disks = @(Get-VMHardDiskDrive -VM $vm | Sort-Object ControllerNumber,ControllerLocation | ForEach-Object {
+                    $vhd = Get-VHD -Path $_.Path -ErrorAction Stop
+                    [pscustomobject]@{ VirtualSize = [int64]$vhd.Size }
+                })
+                [pscustomobject]@{
+                    SourceVMId = $vm.VMId.Guid
+                    State = [string]$vm.State
+                    Generation = [int]$vm.Generation
+                    ProcessorCount = [int]$vm.ProcessorCount
+                    MemoryStartupBytes = [int64]$vm.MemoryStartup
+                    Disks = $disks
+                } | ConvertTo-Json -Depth 5 -Compress
+            POWERSHELL
+            value = @transport.powershell_json(script, timeout: 300)
+            disks = Array(value['Disks'])
+            raise Error, 'Hyper-V VM has no virtual hard disks' if disks.empty?
+            source_disk_bytes = disks.each_with_index.sum do |disk, index|
+                bytes = Integer(disk['VirtualSize'])
+                raise Error, "Hyper-V disk #{index} has invalid virtual size" unless bytes.positive?
+                bytes
+            end
+            {
+                'source_vm_id' => Util.require_text(value['SourceVMId'], 'Hyper-V source VM id'),
+                'source_vm_state' => Util.require_text(value['State'], 'Hyper-V source VM state'),
+                'source_disk_bytes' => source_disk_bytes,
+                'disk_count' => disks.length,
+                'generation' => Integer(value['Generation']),
+                'processor_count' => Integer(value['ProcessorCount']),
+                'memory_startup_bytes' => Integer(value['MemoryStartupBytes'])
+            }
+        rescue KeyError, ArgumentError, TypeError => e
+            raise Error, "incomplete Hyper-V inventory: #{e.message}"
+        end
+
         def inspect(vm_name)
             name64 = Base64.strict_encode64(Util.require_text(vm_name, 'Hyper-V VM name').encode(Encoding::UTF_8))
             script = <<~POWERSHELL
@@ -436,6 +479,15 @@ module OneSwapHyperV
 end
 
 class OneSwapHelper
+    def hyperv_inventory(vm_name, options)
+        send(:apply_verbosity, options) if respond_to?(:apply_verbosity, true)
+        @options = options
+        @options[:name] = OneSwapHyperV::Util.require_text(vm_name, 'Hyper-V VM name')
+        profile = OneSwapHyperV::ConnectionProfile.from_options(@options)
+        source = OneSwapHyperV::Source.new(OneSwapHyperV::SSHTransport.new(profile))
+        source.inventory(@options[:name])
+    end
+
     def hyperv_convert(vm_name, options)
         send(:apply_verbosity, options) if respond_to?(:apply_verbosity, true)
         @options = options

@@ -41,6 +41,9 @@ ALLOWED_REQUEST_KEYS = {
     "expected_guest_macs", "guest_network_profile", "target",
     "required_scratch_bytes",
 }
+ALLOWED_INVENTORY_KEYS = {
+    "tenant_id", "source_connection_id", "source_platform", "source_vm_name",
+}
 ALLOWED_TARGET_KEYS = {
     "datastore", "network", "one_cluster", "one_host", "one_sys_ds",
     "one_ds_cluster", "one_user", "one_group",
@@ -310,6 +313,95 @@ class Engine:
         self.profile(req)
         return req
 
+    def validate_inventory_request(self, raw: Any) -> dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise RequestError("request body must be a JSON object")
+        unknown = set(raw) - ALLOWED_INVENTORY_KEYS
+        if unknown:
+            raise RequestError("unsupported inventory field(s): " + ",".join(sorted(unknown)))
+        req = {
+            "tenant_id": _require_safe_id(raw.get("tenant_id"), "tenant_id"),
+            "source_connection_id": _require_safe_id(raw.get("source_connection_id"), "source_connection_id"),
+            "source_vm_name": _require_vm_name(raw.get("source_vm_name")),
+        }
+        platform = str(raw.get("source_platform", "")).lower().strip()
+        if platform not in {"vmware", "hyperv"}:
+            raise RequestError(f"source platform {platform or '<empty>'} is not live-qualified for inventory", HTTPStatus.UNPROCESSABLE_ENTITY)
+        req["source_platform"] = platform
+        self.profile(req)
+        return req
+
+    def build_inventory_command(self, req: dict[str, Any], profile: dict[str, Any]) -> list[str]:
+        if req["source_platform"] == "hyperv":
+            connection = _require_safe_id(profile.get("hyperv_connection", req["source_connection_id"]), "Hyper-V connection profile")
+            return [
+                self.config.hyperv_binary, req["source_vm_name"], "--inventory",
+                "--hyperv-connection", connection, "--config-file", profile["oneswap_config"],
+            ]
+        return [
+            self.config.oneswap_binary, "convert", req["source_vm_name"],
+            "--inventory-json", "--config-file", profile["oneswap_config"],
+        ]
+
+    def inventory(self, raw: Any) -> dict[str, Any]:
+        req = self.validate_inventory_request(raw)
+        profile = self.profile(req)
+        env = os.environ.copy()
+        env.update({
+            "ONE_AUTH": profile["one_auth"],
+            "ONE_XMLRPC": profile["one_xmlrpc"],
+            "TMPDIR": self.config.scratch_root,
+        })
+        completed = subprocess.run(
+            self.build_inventory_command(req, profile),
+            env=env, cwd=self.config.scratch_root, shell=False,
+            capture_output=True, text=True,
+            timeout=min(self.config.execution_timeout_seconds, 900),
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RequestError("authoritative source inventory failed", HTTPStatus.BAD_GATEWAY)
+        return self._parse_inventory_output(completed.stdout, req)
+
+    @staticmethod
+    def _parse_inventory_output(output: str, req: dict[str, Any]) -> dict[str, Any]:
+        parsed = None
+        for line in reversed(str(output or "").splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and "source_disk_bytes" in value:
+                parsed = value
+                break
+        if parsed is None:
+            raise RequestError("source inventory returned no structured capacity", HTTPStatus.BAD_GATEWAY)
+        try:
+            source_disk_bytes = int(parsed["source_disk_bytes"])
+            disk_count = int(parsed.get("disk_count", 0))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise RequestError("source inventory returned invalid capacity", HTTPStatus.BAD_GATEWAY) from exc
+        if source_disk_bytes <= 0 or disk_count <= 0:
+            raise RequestError("source inventory returned non-positive capacity", HTTPStatus.BAD_GATEWAY)
+        result = {
+            "source_platform": req["source_platform"],
+            "source_vm_name": req["source_vm_name"],
+            "source_vm_id": str(parsed.get("source_vm_id", "")).strip(),
+            "source_vm_state": str(parsed.get("source_vm_state", parsed.get("source_state", ""))).strip(),
+            "source_disk_bytes": source_disk_bytes,
+            "disk_count": disk_count,
+        }
+        for key in ("generation", "processor_count", "memory_startup_bytes"):
+            if key in parsed:
+                try:
+                    result[key] = int(parsed[key])
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RequestError(f"source inventory returned invalid {key}", HTTPStatus.BAD_GATEWAY) from exc
+        return result
+
     def submit(self, operation_id: str, req: dict[str, Any]) -> dict[str, Any]:
         current, created = self.store.create_or_get(operation_id, req)
         if created:
@@ -518,6 +610,9 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             self._authorize_client()
+            if self.path.split("?")[0] == "/v1/inventory":
+                self._send(HTTPStatus.OK, self.engine.inventory(self._json_body()))
+                return
             operation_id = self._operation_id()
             req = self.engine.validate_request(operation_id, self._json_body())
             record = self.engine.submit(operation_id, req)
