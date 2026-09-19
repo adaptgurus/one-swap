@@ -2,6 +2,10 @@ name: Build LayerSentry OneSwap QCOW2
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/appliance-qcow2-build.yml'
+      - 'appliance/**'
   push:
     branches:
       - 'feat/appliance-qcow2-build-*'
