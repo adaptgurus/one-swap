@@ -52,6 +52,8 @@ jobs:
           grep -q 'ProtectSystem=strict' appliance/oneswapd.service
           grep -q 'CapabilityBoundingSet=' appliance/oneswapd.service
           grep -q 'RESOLVER_IMAGE must be pinned by sha256 digest' appliance/prepare-offline-bundle.sh
+          grep -q 'package="$(dpkg-deb -f "$deb" Package)"' appliance/prepare-offline-bundle.sh
+          grep -q "awk -F '\\\\t' 'NF != 3" appliance/prepare-offline-bundle.sh
           grep -q -- '--no-network' appliance/build-qcow2.sh
           grep -q -- '--no-download' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
