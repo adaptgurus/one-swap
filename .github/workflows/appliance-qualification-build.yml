@@ -82,7 +82,7 @@ jobs:
           export OPENNEBULA_RELEASE=7.4.1
           export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-packages-7.4.1.tar.gz"
           export RESOLVER_IMAGE
-          ./appliance/prepare-offline-bundle.sh 2>&1 | tee evidence/offline-bundle-build.log
+          bash ./appliance/prepare-offline-bundle.sh 2>&1 | tee evidence/offline-bundle-build.log
           test -s "$OUTPUT"
           test -s "$OUTPUT.sha256"
           OFFLINE_BUNDLE_SHA256="$(awk '{print $1}' "$OUTPUT.sha256")"
@@ -99,7 +99,7 @@ jobs:
           export OPENNEBULA_RELEASE=7.4.1
           export OUTPUT="$GITHUB_WORKSPACE/output/layersentry-oneswap-7.4.1-ad96c2e1.qcow2"
           export BASE_IMAGE BASE_IMAGE_SHA256 VIRTIO_WIN_ISO VIRTIO_WIN_SHA256 OFFLINE_BUNDLE OFFLINE_BUNDLE_SHA256
-          ./appliance/build-qcow2.sh 2>&1 | tee evidence/qcow2-build.log
+          bash ./appliance/build-qcow2.sh 2>&1 | tee evidence/qcow2-build.log
           test -s "$OUTPUT"
           qemu-img check "$OUTPUT" | tee evidence/qemu-img-check.txt
           qemu-img info "$OUTPUT" | tee evidence/qemu-img-info.txt
