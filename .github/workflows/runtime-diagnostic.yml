@@ -1,0 +1,76 @@
+name: OneSwap Runtime Diagnostic
+
+on:
+  push:
+    branches:
+      - 'qual/appliance-runtime-diagnostic-*'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Install inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils libguestfs-tools curl unzip
+          sudo find /boot -maxdepth 1 -type f -name 'vmlinuz-*' -exec chmod a+r {} +
+          export LIBGUESTFS_BACKEND=direct
+          libguestfs-test-tool
+
+      - name: Fetch exact qualified Hyper-V image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime-diag
+          cd runtime-diag
+          curl -fL --retry 4 --retry-delay 3 \
+            -o qualified-vhdx.zip \
+            https://github.com/adaptgurus/one-swap/releases/download/qualification-transfer-35484331416/layersentry-oneswap-7.4.1-qualified-vhdx.zip
+          printf '%s  %s\n' 'a5cc1895095f9af63efd7c8f46813d99206438f1a744c5f23e563471eeb46cda' qualified-vhdx.zip | sha256sum -c -
+          unzip -q qualified-vhdx.zip
+          printf '%s  %s\n' '450f3f39a7fb8ef35f793f430b19544678a2ed8627783e1ad5dd0f5c8c7e1a99' layersentry-oneswap-7.4.1-qualified.vhdx | sha256sum -c -
+          qemu-img check layersentry-oneswap-7.4.1-qualified.vhdx
+
+      - name: Inspect offline runtime
+        shell: bash
+        env:
+          LIBGUESTFS_BACKEND: direct
+        run: |
+          set -euo pipefail
+          cd runtime-diag
+          cp --reflink=auto layersentry-oneswap-7.4.1-qualified.vhdx inspect.vhdx
+          {
+            echo '=== fstab ==='
+            virt-cat -a inspect.vhdx /etc/fstab || true
+            echo '=== os-release ==='
+            virt-cat -a inspect.vhdx /etc/os-release || true
+            echo '=== init symlink ==='
+            virt-ls -l -a inspect.vhdx /sbin/init || true
+            echo '=== systemd binary ==='
+            virt-ls -l -a inspect.vhdx /lib/systemd/systemd || true
+          } | tee offline-files.txt
+
+          virt-customize --no-network -a inspect.vhdx \
+            --run-command 'set -eux; echo "=== init target ==="; readlink -f /sbin/init; echo "=== init version ==="; /sbin/init --version; echo "=== systemd version ==="; /lib/systemd/systemd --version; echo "=== ldd init ==="; ldd /sbin/init; echo "=== ldd systemd ==="; ldd /lib/systemd/systemd; echo "=== dpkg audit ==="; dpkg --audit; echo "=== dpkg verify ==="; dpkg -V systemd systemd-sysv libc6 libsystemd0 libsystemd-shared || true; echo "=== essential package versions ==="; dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n" systemd systemd-sysv libc6 libsystemd0 libsystemd-shared perl-base; echo "=== loader ==="; ls -l /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6; echo "=== machine-id ==="; ls -l /etc/machine-id; cat /etc/machine-id || true' \
+            2>&1 | tee runtime-integrity.txt
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oneswap-runtime-diagnostic-${{ github.run_id }}
+          path: |
+            runtime-diag/offline-files.txt
+            runtime-diag/runtime-integrity.txt
+          retention-days: 14
+          if-no-files-found: warn
