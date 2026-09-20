@@ -68,6 +68,8 @@ jobs:
             exit 1
           fi
           grep -Fq 'file:/opt/layersentry-build/packages ./' appliance/build-qcow2.sh
+          grep -Fq 'mkdir -p /run/lock' appliance/build-qcow2.sh
+          grep -Fq 'ln -s ../run/lock /var/lock' appliance/build-qcow2.sh
           grep -q 'Dir::Etc::sourcelist=/opt/layersentry-build/offline.list' appliance/build-qcow2.sh
           grep -q 'Dir::Etc::sourceparts=-' appliance/build-qcow2.sh
           grep -q -- '--allow-downgrades' appliance/build-qcow2.sh
