@@ -64,6 +64,8 @@ jobs:
           grep -Fq 'dpkg --unpack /opt/layersentry-build/packages/debs/*.deb' appliance/build-qcow2.sh
           grep -Fq 'dpkg --configure -a' appliance/build-qcow2.sh
           grep -Fq 'test -z "$(dpkg --audit)"' appliance/build-qcow2.sh
+          grep -Fq 'virt-resize --expand /dev/sda1' appliance/build-qcow2.sh
+          ! grep -Fq 'qemu-img resize "$OUTPUT" 32G' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
           test -x appliance/build-qcow2.sh
           test -x appliance/prepare-offline-bundle.sh
