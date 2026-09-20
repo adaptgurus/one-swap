@@ -1,5 +1,5 @@
 name: OneSwap QCOW2 Qualification
-# qualification-candidate: 01fcd16550425f94a29f74a7c8ed4d956888b6fb
+# qualification-candidate: 1cd2c715b70db60f462fe4f55eed01fe84c03091
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 01fcd16550425f94a29f74a7c8ed4d956888b6fb
+          ref: 1cd2c715b70db60f462fe4f55eed01fe84c03091
           persist-credentials: false
 
       - name: Install image build tools
@@ -142,6 +142,18 @@ jobs:
           grep -q $'^opennebula-swap\t' "$OUTPUT.sbom.tsv"
           grep -q '"oneswap_commit"' "$OUTPUT.manifest.json"
 
+      - name: Convert qualification VHDX
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd qualification
+          SRC="layersentry-oneswap-7.4.1.qcow2"
+          VHDX="layersentry-oneswap-7.4.1-qualified.vhdx"
+          qemu-img convert -p -f qcow2 -O vhdx -o subformat=dynamic "$SRC" "$VHDX"
+          qemu-img check "$VHDX" | tee evidence/qemu-img-check-vhdx.txt
+          qemu-img info --output=json "$VHDX" | tee evidence/qemu-img-info-vhdx.json
+          sha256sum "$VHDX" | tee evidence/final-vhdx.sha256
+
       - name: Compress qualification image
         shell: bash
         run: |
@@ -158,6 +170,16 @@ jobs:
           name: oneswap-qcow2-evidence-${{ github.run_id }}
           path: qualification/evidence/
           retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload qualification VHDX
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: layersentry-oneswap-7.4.1-vhdx-${{ github.run_id }}
+          path: qualification/layersentry-oneswap-7.4.1-qualified.vhdx
+          retention-days: 3
+          compression-level: 6
           if-no-files-found: error
 
       - name: Upload compressed QCOW2
