@@ -66,6 +66,7 @@ virt-customize --no-network -a "$OUTPUT" \
   --run-command 'chmod 0644 /usr/share/virtio-win/virtio-win.iso' \
   --run-command 'mkdir -p /opt/layersentry-build/packages; tar -xzf /opt/layersentry-build/packages.tar.gz -C /opt/layersentry-build/packages' \
   --run-command 'cd /opt/layersentry-build/packages && sha256sum -c debs.sha256' \
+  --run-command 'mkdir -p /run/lock; chmod 0755 /run/lock; if [ ! -L /var/lock ]; then test ! -e /var/lock; ln -s ../run/lock /var/lock; fi; test -d /var/lock' \
   --run-command 'printf "%s\n" "deb [trusted=yes] file:/opt/layersentry-build/packages ./" > /opt/layersentry-build/offline.list' \
   --run-command 'export DEBIAN_FRONTEND=noninteractive; apt-get -o Dir::Etc::sourcelist=/opt/layersentry-build/offline.list -o Dir::Etc::sourceparts=- -o Acquire::Languages=none update' \
   --run-command 'export DEBIAN_FRONTEND=noninteractive; set --; while IFS="$(printf "\t")" read -r package version architecture; do [ -n "$package" ] || continue; set -- "$@" "${package}=${version}"; done < /opt/layersentry-build/packages/resolved-installed.tsv; [ "$#" -gt 0 ]; apt-get -y --no-install-recommends --allow-downgrades -o Dir::Etc::sourcelist=/opt/layersentry-build/offline.list -o Dir::Etc::sourceparts=- -o Acquire::Languages=none install "$@"' \
