@@ -1,5 +1,5 @@
 name: OneSwap QCOW2 Qualification
-# qualification-candidate: 261fab1d45cf0b2ac36ea244d41ebf19795c587a
+# qualification-candidate: 237bf1a0e40724704d25900cc001986cf1f3d706
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 261fab1d45cf0b2ac36ea244d41ebf19795c587a
+          ref: 237bf1a0e40724704d25900cc001986cf1f3d706
           persist-credentials: false
 
       - name: Install image build tools
