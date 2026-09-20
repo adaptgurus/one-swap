@@ -12,13 +12,13 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: qual-oneswap-1cd2c715-20260920
       EXPECTED_SHA256: 4d2c1621eeb5567cc735eb2560c87346b3b2c6685f689f8582691ab150a4c680
     steps:
-      - name: Download exact qualified VHDX artifact
+      - name: Download and verify exact qualified VHDX artifact
         shell: bash
         run: |
           set -euo pipefail
@@ -30,18 +30,29 @@ jobs:
           test -s publish/layersentry-oneswap-7.4.1-qualified.vhdx
           printf '%s  %s\n' "$EXPECTED_SHA256" publish/layersentry-oneswap-7.4.1-qualified.vhdx | sha256sum -c -
 
-      - name: Publish temporary qualification prerelease
+      - name: Compress and publish temporary qualification prerelease
         shell: bash
         run: |
           set -euo pipefail
+          command -v zstd >/dev/null
+          cd publish
+          zstd -T0 -8 layersentry-oneswap-7.4.1-qualified.vhdx -o layersentry-oneswap-7.4.1-qualified.vhdx.zst
+          sha256sum layersentry-oneswap-7.4.1-qualified.vhdx.zst > layersentry-oneswap-7.4.1-qualified.vhdx.zst.sha256
+          bytes="$(stat -c %s layersentry-oneswap-7.4.1-qualified.vhdx.zst)"
+          test "$bytes" -lt 2147483648
+          cd ..
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "qualification release already exists: $TAG"
-            exit 1
+            gh release upload "$TAG" \
+              publish/layersentry-oneswap-7.4.1-qualified.vhdx.zst \
+              publish/layersentry-oneswap-7.4.1-qualified.vhdx.zst.sha256 \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" \
+              publish/layersentry-oneswap-7.4.1-qualified.vhdx.zst \
+              publish/layersentry-oneswap-7.4.1-qualified.vhdx.zst.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --target 1cd2c715b70db60f462fe4f55eed01fe84c03091 \
+              --title "OneSwap 7.4.1 qualification VHDX (1cd2c715)" \
+              --notes "Temporary lab qualification asset. Source commit 1cd2c715b70db60f462fe4f55eed01fe84c03091. Raw VHDX SHA-256 4d2c1621eeb5567cc735eb2560c87346b3b2c6685f689f8582691ab150a4c680. Built and qualified by workflow run 35497219805." \
+              --prerelease
           fi
-          gh release create "$TAG" \
-            publish/layersentry-oneswap-7.4.1-qualified.vhdx \
-            --repo "$GITHUB_REPOSITORY" \
-            --target 1cd2c715b70db60f462fe4f55eed01fe84c03091 \
-            --title "OneSwap 7.4.1 qualification VHDX (1cd2c715)" \
-            --notes "Temporary lab qualification asset. Source commit 1cd2c715b70db60f462fe4f55eed01fe84c03091. VHDX SHA-256 4d2c1621eeb5567cc735eb2560c87346b3b2c6685f689f8582691ab150a4c680. Built and qualified by workflow run 35497219805." \
-            --prerelease
