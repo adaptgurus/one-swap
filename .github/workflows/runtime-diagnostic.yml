@@ -64,6 +64,28 @@ jobs:
             --run-command 'set -eux; echo "=== init target ==="; readlink -f /sbin/init; echo "=== init version ==="; /sbin/init --version; echo "=== systemd version ==="; /lib/systemd/systemd --version; echo "=== ldd init ==="; ldd /sbin/init; echo "=== ldd systemd ==="; ldd /lib/systemd/systemd; echo "=== dpkg audit ==="; dpkg --audit; echo "=== dpkg verify ==="; dpkg -V systemd systemd-sysv libc6 libsystemd0 libsystemd-shared || true; echo "=== essential package versions ==="; dpkg-query -W -f="${Package}\t${Version}\t${Architecture}\n" systemd systemd-sysv libc6 libsystemd0 libsystemd-shared perl-base; echo "=== loader ==="; ls -l /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/libc.so.6; echo "=== initramfs packages ==="; dpkg-query -W -f="\\${Package}\\t\\${Version}\\n" initramfs-tools initramfs-tools-core busybox klibc-utils 2>/dev/null || true; echo "=== boot files ==="; ls -lh /boot; echo "=== initramfs inventory ==="; for i in /boot/initrd.img-*; do echo "--- $i"; test -s "$i"; lsinitramfs "$i" | grep -E "^(init|scripts/|usr/lib/systemd/systemd|lib.*/libc\\.so|usr/sbin/switch_root|bin/busybox)" | head -120; done; echo "=== root identity ==="; findmnt -s / || true; blkid; echo "=== machine-id ==="; ls -l /etc/machine-id; cat /etc/machine-id || true' \
             2>&1 | tee runtime-integrity.txt
 
+      - name: Boot exact image under QEMU
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd runtime-diag
+          OVMF_CODE="$(find /usr/share/OVMF /usr/share/ovmf -type f \( -name 'OVMF_CODE.fd' -o -name 'OVMF_CODE_4M.fd' \) 2>/dev/null | head -1)"
+          test -n "$OVMF_CODE"
+          cp --reflink=auto layersentry-oneswap-7.4.1-qualified.vhdx boot-test.vhdx
+          set +e
+          timeout 90s qemu-system-x86_64 \
+            -machine q35,accel=tcg \
+            -m 2048 -smp 2 \
+            -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+            -drive file=boot-test.vhdx,format=vhdx,if=virtio \
+            -nographic -serial mon:stdio -no-reboot \
+            2>&1 | tee qemu-boot.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "qemu_exit=$rc" | tee qemu-exit.txt
+          grep -E -i 'panic|failed|error|systemd|init|switch_root|run-init|emergency|mount' qemu-boot.txt | tail -300 > qemu-boot-focus.txt || true
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -72,5 +94,8 @@ jobs:
           path: |
             runtime-diag/offline-files.txt
             runtime-diag/runtime-integrity.txt
+            runtime-diag/qemu-boot.txt
+            runtime-diag/qemu-boot-focus.txt
+            runtime-diag/qemu-exit.txt
           retention-days: 14
           if-no-files-found: warn
