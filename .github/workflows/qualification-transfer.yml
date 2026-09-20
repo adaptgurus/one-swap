@@ -1,0 +1,86 @@
+name: OneSwap Qualification Transfer
+
+on:
+  push:
+    branches:
+      - 'qual/transfer-*'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish-hyperv-derivative:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TAG: qualification-transfer-35484331416
+      SOURCE_ARTIFACT_ID: "10596613699"
+      SOURCE_ZST_SHA256: "9d79342a247c9f6a45c64274d13772fe05a39cea77d03c57ffde434280b18f76"
+      SOURCE_QCOW2_SHA256: "ecf03a96d4f55d8590501e048029c3a10347971b1ff82a120aca196afca5d5d0"
+      QUALIFIED_ONESWAP_COMMIT: "261fab1d45cf0b2ac36ea244d41ebf19795c587a"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 0af2fe41500ee425b766b3755140ac07af89b0b9
+          persist-credentials: false
+
+      - name: Install conversion tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-utils zstd unzip zip
+          qemu-img --version
+          zstd --version
+
+      - name: Download exact qualified artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p transfer
+          gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/adaptgurus/one-swap/actions/artifacts/${SOURCE_ARTIFACT_ID}/zip" > transfer/source-artifact.zip
+          unzip -q transfer/source-artifact.zip -d transfer/source
+          test -f transfer/source/layersentry-oneswap-7.4.1.qcow2.zst
+          printf '%s  %s\n' "$SOURCE_ZST_SHA256" transfer/source/layersentry-oneswap-7.4.1.qcow2.zst | sha256sum -c -
+
+      - name: Verify and convert qualified image to Hyper-V VHDX
+        shell: bash
+        run: |
+          set -euo pipefail
+          zstd -d transfer/source/layersentry-oneswap-7.4.1.qcow2.zst -o transfer/layersentry-oneswap-7.4.1.qcow2
+          printf '%s  %s\n' "$SOURCE_QCOW2_SHA256" transfer/layersentry-oneswap-7.4.1.qcow2 | sha256sum -c -
+          qemu-img check transfer/layersentry-oneswap-7.4.1.qcow2
+          qemu-img convert -p -f qcow2 -O vhdx -o subformat=dynamic,block_size=1048576 \
+            transfer/layersentry-oneswap-7.4.1.qcow2 \
+            transfer/layersentry-oneswap-7.4.1-qualified.vhdx
+          qemu-img check transfer/layersentry-oneswap-7.4.1-qualified.vhdx
+          sha256sum transfer/layersentry-oneswap-7.4.1-qualified.vhdx | tee transfer/vhdx.sha256
+          printf 'qualified_oneswap_commit=%s\nsource_qcow2_sha256=%s\nsource_zst_sha256=%s\n' \
+            "$QUALIFIED_ONESWAP_COMMIT" "$SOURCE_QCOW2_SHA256" "$SOURCE_ZST_SHA256" > transfer/transfer-manifest.txt
+          zip -1 -j transfer/layersentry-oneswap-7.4.1-qualified-vhdx.zip \
+            transfer/layersentry-oneswap-7.4.1-qualified.vhdx \
+            transfer/vhdx.sha256 transfer/transfer-manifest.txt
+          sha256sum transfer/layersentry-oneswap-7.4.1-qualified-vhdx.zip | tee transfer/vhdx-zip.sha256
+          ls -lh transfer/layersentry-oneswap-7.4.1-qualified-vhdx.zip
+
+      - name: Publish temporary prerelease asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --yes --cleanup-tag >/dev/null 2>&1 || true
+          gh release create "$TAG" \
+            --target 0af2fe41500ee425b766b3755140ac07af89b0b9 \
+            --prerelease \
+            --title "Temporary OneSwap qualification transfer 35484331416" \
+            --notes "Temporary lab-transfer derivative of QCOW2 qualification run 35484331416. Contains no runtime secrets. Delete after lab import."
+          gh release upload "$TAG" \
+            transfer/layersentry-oneswap-7.4.1-qualified-vhdx.zip \
+            transfer/vhdx-zip.sha256 \
+            transfer/vhdx.sha256 \
+            transfer/transfer-manifest.txt
