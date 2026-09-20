@@ -1,5 +1,5 @@
 name: OneSwap QCOW2 Qualification
-# qualification-candidate: 237bf1a0e40724704d25900cc001986cf1f3d706
+# qualification-candidate: 1e69b1c4250ce5f407fa0f74b12251b0a0307bf2
 
 on:
   push:
