@@ -1,0 +1,46 @@
+name: Publish Qualified OneSwap VHDX
+
+on:
+  push:
+    branches:
+      - 'qual/appliance-qcow2-publish-*'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_ARTIFACT_ID: "10601158488"
+      EXPECTED_VHDX_SHA256: "4d2c1621eeb5567cc735eb2560c87346b3b2c6685f689f8582691ab150a4c680"
+      RELEASE_TAG: "qualification-oneswap-7.4.1-20260920"
+      SOURCE_COMMIT: "1cd2c715b70db60f462fe4f55eed01fe84c03091"
+    steps:
+      - name: Download exact qualified VHDX artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SOURCE_ARTIFACT_ID}/zip" > artifact.zip
+          unzip -q artifact.zip
+          test -f layersentry-oneswap-7.4.1-qualified.vhdx
+          printf '%s  %s\n' "$EXPECTED_VHDX_SHA256" layersentry-oneswap-7.4.1-qualified.vhdx | sha256sum -c -
+
+      - name: Publish qualification prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" layersentry-oneswap-7.4.1-qualified.vhdx --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$SOURCE_COMMIT" \
+              --prerelease \
+              --title "OneSwap 7.4.1 Qualification Appliance" \
+              --notes "Qualification-only appliance. Built by run 35497219805 from exact OneSwap commit $SOURCE_COMMIT. VHDX SHA-256: $EXPECTED_VHDX_SHA256. Not a production-readiness claim until live boot and migration gates pass." \
+              layersentry-oneswap-7.4.1-qualified.vhdx
+          fi
