@@ -11,6 +11,7 @@ on:
       - 'feat/layersentry-oneswap-appliance-*'
       - 'feat/appliance-reproducible-*'
       - 'fix/appliance-offline-local-apt-*'
+      - 'fix/appliance-initramfs-refresh-*'
 
 permissions:
   contents: read
@@ -73,6 +74,10 @@ jobs:
           grep -q 'Dir::Etc::sourcelist=/opt/layersentry-build/offline.list' appliance/build-qcow2.sh
           grep -q 'Dir::Etc::sourceparts=-' appliance/build-qcow2.sh
           grep -q -- '--allow-downgrades' appliance/build-qcow2.sh
+          grep -Fq 'update-initramfs -u -k all' appliance/build-qcow2.sh
+          grep -Fq 'guest initramfs tooling is missing after offline package transaction' appliance/build-qcow2.sh
+          grep -Fq 'lsinitramfs "$initrd" | grep -qx init' appliance/build-qcow2.sh
+          grep -Fq 'systemd-udevd|udevd' appliance/build-qcow2.sh
           grep -q 'OFFLINE_BUNDLE_SHA256' appliance/build-qcow2.sh
           grep -q 'offline bundle schema mismatch' appliance/build-qcow2.sh
           test -x appliance/build-qcow2.sh
