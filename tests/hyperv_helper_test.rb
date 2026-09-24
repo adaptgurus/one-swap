@@ -37,4 +37,44 @@ class HyperVHelperTest < Minitest::Test
     assert_includes xml, "type='vhdx'"
     assert_includes xml, 'vm&lt;&amp;'
   end
+  def test_target_sizing_cli_and_template_contract
+    cli=File.read(File.expand_path('../oneswap-hyperv', __dir__))
+    helper=File.read(File.expand_path('../hyperv_helper.rb', __dir__))
+    assert_includes cli, "opts.on('--cpu CPU', Float"
+    assert_includes cli, "opts.on('--memory-mb MB', Integer"
+    assert_includes helper, '@options[:memory_mb]'
+    assert_includes helper, "'CPU' => cpu_weight.to_s"
+    assert_includes helper, "'VCPU' => vcpu.to_s"
+  end
+
+end
+
+
+class HyperVSSHTransportCommandLengthTest < Minitest::Test
+  FakeProfile = Struct.new(:known_hosts, :port, :identity_file, :destination)
+
+  def transport
+    OneSwapHyperV::SSHTransport.new(
+      FakeProfile.new('/tmp/known_hosts', 22, '/tmp/id_ed25519', 'user@host')
+    )
+  end
+
+  def test_small_powershell_uses_encoded_command
+    argv, stdin_data = transport.send(:powershell_invocation, "Write-Output 'ok'")
+    assert_includes argv, '-EncodedCommand'
+    refute_includes argv, '-Command'
+    assert_nil stdin_data
+  end
+
+  def test_large_powershell_uses_stdin_command_transport
+    script = "$x='a'\n" + ("Write-Output $x\n" * 2_000)
+    argv, stdin_data = transport.send(:powershell_invocation, script)
+    assert_includes argv, '-EncodedCommand'
+    refute_includes argv, '-Command'
+    refute_equal OneSwapHyperV::Util.powershell_encoded(script), argv.last
+    assert_equal script, stdin_data
+    assert_operator OneSwapHyperV::Util.powershell_encoded(script).bytesize,
+                    :>,
+                    OneSwapHyperV::SSHTransport::POWERSHELL_ENCODED_COMMAND_MAX_BYTES
+  end
 end

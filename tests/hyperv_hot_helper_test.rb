@@ -99,4 +99,67 @@ class HyperVHotHelperTest < Minitest::Test
     assert_equal true, inventory['secure_boot']
   end
 
+  def test_warm_baseline_accepts_app_or_crash_consistency_but_rejects_unknown
+    source = OneSwapHyperV::HotSource.allocate
+    assert_equal 1, source.send(:validate_baseline_consistency!, {'ConsistencyLevel'=>1})
+    assert_equal 2, source.send(:validate_baseline_consistency!, {'ConsistencyLevel'=>2})
+    assert_raises(OneSwapHyperV::Error) do
+      source.send(:validate_baseline_consistency!, {'ConsistencyLevel'=>3})
+    end
+  end
+
+  def test_target_digest_binds_lab_sizing_overrides
+    coordinator=OneSwapHyperV::HotCoordinator.allocate
+    coordinator.instance_variable_set(:@options,{datastore:'1',network:'0',cpu:0.5,vcpu:2,memory_mb:2560})
+    base=coordinator.send(:target_digest)
+
+    coordinator.instance_variable_set(:@options,{datastore:'1',network:'0',cpu:1.0,vcpu:2,memory_mb:2560})
+    refute_equal base, coordinator.send(:target_digest)
+
+    coordinator.instance_variable_set(:@options,{datastore:'1',network:'0',cpu:0.5,vcpu:2,memory_mb:2048})
+    refute_equal base, coordinator.send(:target_digest)
+  end
+
+  def test_reference_prepare_uses_backup_checkpoint_export_then_rct_conversion
+    source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+    create_pos = source.index("SnapshotType=[uint16]32768")
+    export_pos = source.index("Invoke-CimMethod -MethodName ExportSystemDefinition")
+    convert_pos = source.index("Invoke-CimMethod -MethodName ConvertToReferencePoint")
+    rct_pos = source.index('$rctIds=@($ref.ResilientChangeTrackingIdentifiers)')
+    refute_nil create_pos
+    refute_nil export_pos
+    refute_nil convert_pos
+    refute_nil rct_pos
+    assert_operator create_pos, :<, export_pos
+    assert_operator export_pos, :<, convert_pos
+    assert_operator convert_pos, :<, rct_pos
+    assert_includes source, 'CopySnapshotConfiguration=[uint16]3'
+    assert_includes source, 'CopyVmStorage=$true'
+    assert_includes source, "VirtualSystemType -eq 'Microsoft:Hyper-V:Snapshot:Recovery'"
+    assert_includes source, '$paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter'
+    assert_includes source, "Invoke-CimMethod -MethodName DestroySnapshot"
+    assert_includes source, "Invoke-CimMethod -MethodName DestroyReferencePoint"
+    assert_includes source, 'converted RCT identifier is empty for disk index'
+    refute_includes source, '$svc.ExportReferencePoint'
+  end
+
+  def test_reference_prepare_generated_script_preserves_cim_namespace
+    source = OneSwapHyperV::HotSource.allocate
+    script = source.send(:reference_prepare_script, '', '', '', 1)
+    assert_includes script, "$ns='root\\virtualization\\v2'"
+    refute_includes script, "\v"
+    assert_includes script, '$slash=[string][char]92'
+    assert_includes script, '$escapedValue=$value.Replace($slash,$slash+$slash)'
+    refute_includes script, ".Replace('','"
+    assert_includes script, '$parts=@($instanceId.Split([char]92)'
+    refute_includes script, '$instanceId -match'
+  end
+
+  def test_hot_cutover_uses_graceful_stop_vm_without_unsafe_switches
+    source_text = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+    assert_includes source_text, 'Stop-VM -VM $vm -ErrorAction Stop'
+    refute_includes source_text, 'Stop-VM -VM $vm -Shutdown'
+    refute_includes source_text, 'Stop-VM -VM $vm -TurnOff'
+  end
+
 end
