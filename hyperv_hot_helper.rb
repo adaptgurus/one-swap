@@ -462,7 +462,7 @@ module OneSwapHyperV
                     }
                 })
 
-                $ns='root\virtualization\v2'
+                $ns='root\\virtualization\\v2'
                 $cs=Get-CimInstance -Namespace $ns -ClassName Msvm_ComputerSystem -Filter "Name='$($vm.VMId.Guid)'"
                 if ($null -eq $cs) { throw 'Hyper-V computer system was not found' }
                 $snapshotSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemSnapshotService
