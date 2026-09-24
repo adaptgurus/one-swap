@@ -590,6 +590,9 @@ class OneSwapHelper
             'HYPERV_SOURCE_HOST' => @hyperv_source_host.to_s,
             'ONESWAP_SOURCE_PLATFORM' => 'HYPERV'
         }
+        if @options[:qemu_ga_linux] || !@options[:qemu_ga_win].to_s.strip.empty?
+            config['FEATURES'] = { 'GUEST_AGENT' => 'YES' }
+        end
         unless @options[:disable_contextualization]
             config['CONTEXT'] = {
                 'NETWORK' => 'YES',
