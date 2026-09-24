@@ -130,14 +130,8 @@ class HyperVHotHelperTest < Minitest::Test
     assert_includes script, '$slash=[string][char]92'
     assert_includes script, '$escapedValue=$value.Replace($slash,$slash+$slash)'
     refute_includes script, ".Replace('','"
-    assert_includes script, "if ($instanceId -match '\\\\([0-9]+)\\\\([0-9]+)\\\\L  end
-
-end
-) {"
-    refute_includes script, "if ($instanceId -match '\\([0-9]+)\\([0-9]+)\\L  end
-
-end
-) {"
+    assert_includes script, '$parts=@($instanceId.Split([char]92)'
+    refute_includes script, '$instanceId -match'
   end
 
 end
