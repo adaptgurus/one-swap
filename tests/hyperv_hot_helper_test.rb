@@ -99,6 +99,15 @@ class HyperVHotHelperTest < Minitest::Test
     assert_equal true, inventory['secure_boot']
   end
 
+  def test_warm_baseline_accepts_app_or_crash_consistency_but_rejects_unknown
+    source = OneSwapHyperV::HotSource.allocate
+    assert_equal 1, source.send(:validate_baseline_consistency!, {'ConsistencyLevel'=>1})
+    assert_equal 2, source.send(:validate_baseline_consistency!, {'ConsistencyLevel'=>2})
+    assert_raises(OneSwapHyperV::Error) do
+      source.send(:validate_baseline_consistency!, {'ConsistencyLevel'=>3})
+    end
+  end
+
   def test_reference_prepare_uses_backup_checkpoint_export_then_rct_conversion
     source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
     create_pos = source.index("SnapshotType=[uint16]32768")
