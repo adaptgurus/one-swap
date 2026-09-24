@@ -108,6 +108,18 @@ class HyperVHotHelperTest < Minitest::Test
     end
   end
 
+  def test_target_digest_binds_lab_sizing_overrides
+    coordinator=OneSwapHyperV::HotCoordinator.allocate
+    coordinator.instance_variable_set(:@options,{datastore:'1',network:'0',cpu:0.5,vcpu:2,memory_mb:2560})
+    base=coordinator.send(:target_digest)
+
+    coordinator.instance_variable_set(:@options,{datastore:'1',network:'0',cpu:1.0,vcpu:2,memory_mb:2560})
+    refute_equal base, coordinator.send(:target_digest)
+
+    coordinator.instance_variable_set(:@options,{datastore:'1',network:'0',cpu:0.5,vcpu:2,memory_mb:2048})
+    refute_equal base, coordinator.send(:target_digest)
+  end
+
   def test_reference_prepare_uses_backup_checkpoint_export_then_rct_conversion
     source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
     create_pos = source.index("SnapshotType=[uint16]32768")
