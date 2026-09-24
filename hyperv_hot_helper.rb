@@ -435,7 +435,449 @@ module OneSwapHyperV
                         if ($instanceId -like "*$($disk.VirtualDiskId)*") { return [string]$disk.Path }
                     }
                     # The reference identifier commonly ends with controller/location/L.
-                    if ($instanceId -match '\\([0-9]+)\\([0-9]+)\\L$') {
+                    if ($instanceId -match '\\\\([0-9]+)\\\\([0-9]+)\\\\L
+                        $controller=[int]$Matches[1]
+                        $location=[int]$Matches[2]
+                        foreach ($disk in $sourceDisks) {
+                            if ([int]$disk.ControllerNumber -eq $controller -and [int]$disk.ControllerLocation -eq $location) {
+                                return [string]$disk.Path
+                            }
+                        }
+                    }
+                    return $null
+                }
+
+                $name=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{name64}'))
+                $staging=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{staging64}'))
+                $op=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{op64}'))
+                $vm=Get-VM -Name $name -ErrorAction Stop
+                if ([string]$vm.State -ne 'Running') { throw "source VM must be Running during hot prepare; state=$($vm.State)" }
+
+                $sourceDisks=@(Get-VMHardDiskDrive -VM $vm | Sort-Object ControllerNumber,ControllerLocation | ForEach-Object {
+                    $vhd=Get-VHD -Path $_.Path -ErrorAction Stop
+                    [pscustomobject]@{
+                        Path=$_.Path
+                        VirtualDiskId=[string]$vhd.DiskIdentifier
+                        VirtualSize=[int64]$vhd.Size
+                        ControllerNumber=[int]$_.ControllerNumber
+                        ControllerLocation=[int]$_.ControllerLocation
+                    }
+                })
+
+                $ns='root\\virtualization\\v2'
+                $cs=Get-CimInstance -Namespace $ns -ClassName Msvm_ComputerSystem -Filter "Name='$($vm.VMId.Guid)'"
+                if ($null -eq $cs) { throw 'Hyper-V computer system was not found' }
+                $snapshotSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemSnapshotService
+                $managementSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemManagementService
+                $referenceSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemReferencePointService
+
+                $beforeSnapshots=@(Recovery-Snapshots $cs | ForEach-Object {$_.InstanceID})
+                $beforeRefs=@(Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | ForEach-Object {$_.InstanceID})
+                $exportDir=Join-Path $staging ('layersentry-hot-'+($op -replace '[^A-Za-z0-9_.-]','_'))
+                $snapshot=$null
+                $ref=$null
+                $snapshotConverted=$false
+                $prepareComplete=$false
+
+                try {
+                    if (Test-Path -LiteralPath $exportDir) {
+                        if ((Get-ChildItem -LiteralPath $exportDir -Force | Measure-Object).Count -gt 0) { throw "staging directory already contains data: $exportDir" }
+                    } else {
+                        New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
+                    }
+
+                    # Microsoft Hyper-V backup sequence:
+                    # 1. Create a recovery/backup snapshot (32768).
+                    # 2. Export that recovery snapshot with ExportSystemDefinition.
+                    # 3. Convert the recovery snapshot to an RCT reference point.
+                    $snapshotSettings=Get-CimClass -Namespace $ns -ClassName Msvm_VirtualSystemSnapshotSettingData |
+                        New-CimInstance -ClientOnly -Property @{
+                            ConsistencyLevel=[uint16]#{consistency.to_i}
+                            IgnoreNonSnapshottableDisks=$true
+                        }
+                    $create=$snapshotSvc | Invoke-CimMethod -MethodName CreateSnapshot -Arguments @{
+                        AffectedSystem=$cs
+                        SnapshotSettings=($snapshotSettings | ConvertTo-CimEmbeddedString)
+                        SnapshotType=[uint16]32768
+                    }
+                    Wait-CimResult $create 'Create recovery backup checkpoint' | Out-Null
+                    $newSnapshots=@(Recovery-Snapshots $cs | Where-Object {$beforeSnapshots -notcontains $_.InstanceID})
+                    if ($newSnapshots.Count -ne 1) { throw "expected exactly one new recovery checkpoint; found $($newSnapshots.Count)" }
+                    $snapshot=$newSnapshots[0]
+
+                    $exportSettings=@($cs |
+                        Get-CimAssociatedInstance -Association Msvm_SystemExportSettingData -ResultClassName Msvm_VirtualSystemExportSettingData)
+                    if ($exportSettings.Count -lt 1) { throw 'Msvm_VirtualSystemExportSettingData unavailable' }
+                    $exportSetting=$exportSettings[0]
+                    $exportSetting.CopySnapshotConfiguration=[uint16]3
+                    $exportSetting.CopyVmRuntimeInformation=$false
+                    $exportSetting.CopyVmStorage=$true
+                    $exportSetting.CreateVmExportSubdirectory=$false
+                    $exportSetting.SnapshotVirtualSystem=Get-CimInstancePath $snapshot
+                    $exportSetting.DifferentialBackupBase=$null
+                    $exportSetting.BackupIntent=[uint16]0
+
+                    $export=$managementSvc | Invoke-CimMethod -MethodName ExportSystemDefinition -Arguments @{
+                        ComputerSystem=$cs
+                        ExportDirectory=$exportDir
+                        ExportSettingData=($exportSetting | ConvertTo-CimEmbeddedString)
+                    }
+                    Wait-CimResult $export 'Export recovery backup checkpoint' | Out-Null
+
+                    $paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter '*.vhdx' | ForEach-Object {$_.FullName})
+                    $exports=@($paths | ForEach-Object {
+                        $vhd=Get-VHD -Path $_ -ErrorAction Stop
+                        $item=Get-Item -LiteralPath $_ -ErrorAction Stop
+                        $hash=Get-FileHash -LiteralPath $_ -Algorithm SHA256 -ErrorAction Stop
+                        [pscustomobject]@{
+                            Path=$_
+                            VirtualDiskId=[string]$vhd.DiskIdentifier
+                            VirtualSize=[int64]$vhd.Size
+                            FileSize=[int64]$item.Length
+                            SHA256=$hash.Hash.ToLowerInvariant()
+                        }
+                    })
+                    if ($exports.Count -ne $sourceDisks.Count) { throw "backup export produced $($exports.Count) VHDX disks; expected $($sourceDisks.Count)" }
+
+                    $convert=$snapshotSvc | Invoke-CimMethod -MethodName ConvertToReferencePoint -Arguments @{
+                        AffectedSnapshot=$snapshot
+                    }
+                    Wait-CimResult $convert 'Convert recovery checkpoint to reference point' | Out-Null
+                    $snapshotConverted=$true
+
+                    $refs=@(Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" |
+                        Where-Object {$beforeRefs -notcontains $_.InstanceID})
+                    if ($refs.Count -ne 1) { throw "expected exactly one new RCT reference point after conversion; found $($refs.Count)" }
+                    $ref=$refs[0]
+
+                    $virtualDiskIds=@($ref.VirtualDiskIdentifiers)
+                    $rctIds=@($ref.ResilientChangeTrackingIdentifiers)
+                    if ([int]$ref.ReferencePointType -ne 2) {
+                        throw "converted recovery checkpoint produced non-RCT reference type $($ref.ReferencePointType)"
+                    }
+                    if ([bool]$ref.HasAssociatedData) {
+                        throw 'converted RCT reference point unexpectedly has associated log data'
+                    }
+                    if ($virtualDiskIds.Count -ne $sourceDisks.Count) {
+                        throw "RCT reference point has $($virtualDiskIds.Count) disk identifiers; expected $($sourceDisks.Count)"
+                    }
+                    if ($rctIds.Count -ne $virtualDiskIds.Count) {
+                        throw "RCT reference point disk/id arrays differ after conversion: disks=$($virtualDiskIds.Count) rct=$($rctIds.Count)"
+                    }
+
+                    $rct=@()
+                    for ($i=0;$i -lt $virtualDiskIds.Count;$i++) {
+                        $rctId=[string]$rctIds[$i]
+                        if ([string]::IsNullOrWhiteSpace($rctId)) { throw "converted RCT identifier is empty for disk index $i" }
+                        $path=Resolve-DiskPath ([string]$virtualDiskIds[$i]) $sourceDisks
+                        if ([string]::IsNullOrWhiteSpace($path)) { throw "unable to map converted RCT disk identifier $($virtualDiskIds[$i]) to a source VHDX" }
+                        $rct += [pscustomobject]@{
+                            Path=$path
+                            VirtualDiskIdentifier=[string]$virtualDiskIds[$i]
+                            RCTId=$rctId
+                        }
+                    }
+
+                    $prepareComplete=$true
+                    [pscustomobject]@{
+                        ReferencePointId=$ref.InstanceID
+                        ConsistencyLevel=[int]$ref.ConsistencyLevel
+                        RemoteExportDir=$exportDir
+                        RCT=$rct
+                        ExportedDisks=$exports
+                    } | ConvertTo-Json -Depth 8 -Compress
+                } finally {
+                    if (-not $prepareComplete) {
+                        if ($null -ne $ref) {
+                            try {
+                                $destroy=$referenceSvc | Invoke-CimMethod -MethodName DestroyReferencePoint -Arguments @{AffectedReferencePoint=$ref}
+                                Wait-CimResult $destroy 'Rollback reference point' | Out-Null
+                            } catch {}
+                        } elseif ($null -ne $snapshot -and -not $snapshotConverted) {
+                            try {
+                                $destroySnapshot=$snapshotSvc | Invoke-CimMethod -MethodName DestroySnapshot -Arguments @{AffectedSnapshot=$snapshot}
+                                Wait-CimResult $destroySnapshot 'Rollback recovery checkpoint' | Out-Null
+                            } catch {}
+                        }
+                        if ($exportDir -and (Test-Path -LiteralPath $exportDir)) {
+                            Remove-Item -LiteralPath $exportDir -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            POWERSHELL
+        end
+
+        def create_remote_delta_bundle!(state, disk, index)
+            path64 = Base64.strict_encode64(disk.fetch('source_path').encode(Encoding::UTF_8))
+            rct64 = Base64.strict_encode64(disk.fetch('rct_id').encode(Encoding::UTF_8))
+            dir64 = Base64.strict_encode64(state.fetch('remote_export_dir').encode(Encoding::UTF_8))
+            op64 = Base64.strict_encode64(state.fetch('operation_id').encode(Encoding::UTF_8))
+            virtual_size = Integer(disk.fetch('virtual_size'))
+            script = <<~POWERSHELL
+                $ErrorActionPreference='Stop'
+                $ProgressPreference='SilentlyContinue'
+                [Console]::OutputEncoding=[Text.Encoding]::UTF8
+                function Wait-WmiJob([string]$jobPath) {
+                    $job=[wmi]$jobPath
+                    while ($job.JobState -eq 3 -or $job.JobState -eq 4) { Start-Sleep 1; $job.Get() }
+                    if ($job.JobState -ne 7) { throw "Hyper-V WMI job failed state=$($job.JobState) error=$($job.ErrorDescription)" }
+                }
+                $path=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{path64}'))
+                $rct=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{rct64}'))
+                $dir=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{dir64}'))
+                $op=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{op64}'))
+                $virtualSize=[int64]#{virtual_size}
+                $svc=Get-WmiObject -Namespace root/virtualization/v2 -Class Msvm_ImageManagementService
+                $ranges=New-Object System.Collections.Generic.List[object]
+                $offset=[int64]0
+                $chunk=[int64]#{HOT_QUERY_CHUNK}
+                while ($offset -lt $virtualSize) {
+                    $remaining=$virtualSize-$offset
+                    $length=[Math]::Min($chunk,$remaining)
+                    if ($offset -eq 0 -and $length -eq $virtualSize -and $virtualSize -gt 1) { $length=$virtualSize-1 }
+                    $result=$svc.GetVirtualDiskChanges($path,$rct,'',$offset,$length)
+                    if ($result.ReturnValue -eq 4096) { Wait-WmiJob $result.Job; $result=$svc.GetVirtualDiskChanges($path,$rct,'',$offset,$length) }
+                    if ($result.ReturnValue -ne 0) { throw "GetVirtualDiskChanges failed code=$($result.ReturnValue) offset=$offset length=$length" }
+                    for ($i=0;$i -lt @($result.ChangedByteOffsets).Count;$i++) { $ranges.Add([pscustomobject]@{Offset=[int64]$result.ChangedByteOffsets[$i];Length=[int64]$result.ChangedByteLengths[$i]}) }
+                    $processed=[int64]$result.ProcessedByteLength
+                    if ($processed -le 0) { throw 'GetVirtualDiskChanges returned zero processed bytes' }
+                    $offset += $processed
+                }
+                $mount=Mount-VHD -Path $path -ReadOnly -NoDriveLetter -Passthru -ErrorAction Stop
+                try {
+                    $diskObj=$mount | Get-Disk -ErrorAction Stop
+                    $rawPath='\\.\\PhysicalDrive'+$diskObj.Number
+                    $source=[IO.File]::Open($rawPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+                    try {
+                        $bundle=Join-Path $dir ('delta-#{index.to_i}-'+($op -replace '[^A-Za-z0-9_.-]','_')+'.lshv')
+                        $out=[IO.File]::Open($bundle,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                        $writer=New-Object IO.BinaryWriter($out)
+                        try {
+                            $writer.Write([Text.Encoding]::ASCII.GetBytes('LSHVDEL1')); $writer.Write([int64]$virtualSize); $writer.Write([int32]$ranges.Count)
+                            $buffer=New-Object byte[] (1024*1024)
+                            foreach ($range in $ranges) {
+                                if ($range.Offset -lt 0 -or $range.Length -lt 0 -or ($range.Offset+$range.Length) -gt $virtualSize) { throw 'RCT returned an out-of-bounds changed range' }
+                                $writer.Write([int64]$range.Offset); $writer.Write([int64]$range.Length)
+                                $source.Seek([int64]$range.Offset,[IO.SeekOrigin]::Begin) | Out-Null
+                                $remaining=[int64]$range.Length
+                                while ($remaining -gt 0) {
+                                    $want=[int][Math]::Min($buffer.Length,$remaining); $read=$source.Read($buffer,0,$want)
+                                    if ($read -le 0) { throw 'unexpected EOF reading mounted VHDX changed range' }
+                                    $writer.Write($buffer,0,$read); $remaining-=$read
+                                }
+                            }
+                        } finally { $writer.Dispose(); $out.Dispose() }
+                    } finally { $source.Dispose() }
+                } finally { Dismount-VHD -Path $path -ErrorAction SilentlyContinue }
+                $item=Get-Item -LiteralPath $bundle; $hash=Get-FileHash -LiteralPath $bundle -Algorithm SHA256
+                [pscustomobject]@{Path=$bundle;FileSize=[int64]$item.Length;SHA256=$hash.Hash.ToLowerInvariant();RangeCount=$ranges.Count;VirtualSize=$virtualSize}|ConvertTo-Json -Compress
+            POWERSHELL
+            @transport.powershell_json(script, timeout: (@options[:hyperv_delta_timeout] || 7200).to_i)
+        end
+    end
+
+    class DeltaApplier
+        def self.apply!(bundle_path, raw_path, expected_virtual_size)
+            File.open(bundle_path, 'rb') do |bundle|
+                raise Error, "invalid Hyper-V delta bundle magic in #{bundle_path}" unless bundle.read(8) == DELTA_MAGIC
+                virtual_size = bundle.read(8)&.unpack1('q<'); count = bundle.read(4)&.unpack1('l<')
+                raise Error, 'truncated Hyper-V delta bundle header' unless virtual_size && count
+                raise Error, "delta virtual size #{virtual_size} does not match prepared disk #{expected_virtual_size}" unless virtual_size == expected_virtual_size
+                raise Error, 'delta range count is invalid' if count.negative? || count > 10_000_000
+                raise Error, "prepared RAW disk size #{File.size(raw_path)} does not match virtual size #{virtual_size}" unless File.size(raw_path) == virtual_size
+                File.open(raw_path, 'r+b') do |raw|
+                    count.times do
+                        offset = bundle.read(8)&.unpack1('q<'); length = bundle.read(8)&.unpack1('q<')
+                        raise Error, 'truncated Hyper-V delta range header' unless offset && length
+                        raise Error, 'Hyper-V delta range is out of bounds' if offset.negative? || length.negative? || offset + length > virtual_size
+                        raw.seek(offset, IO::SEEK_SET); remaining = length
+                        while remaining > 0
+                            chunk = bundle.read([remaining, 1024 * 1024].min)
+                            raise Error, 'truncated Hyper-V delta payload' if chunk.nil? || chunk.empty?
+                            raw.write(chunk); remaining -= chunk.bytesize
+                        end
+                    end
+                    raw.flush; raw.fsync
+                end
+                raise Error, 'Hyper-V delta bundle contains trailing bytes' unless bundle.read(1).nil?
+            end
+            true
+        end
+    end
+
+    class HotCoordinator
+        def initialize(helper, options)
+            @helper = helper
+            @profile = ConnectionProfile.from_options(options)
+            @options = resolve_hot_options(options)
+            @operation_id = HotUtil.operation_id!(@options)
+            @vm_name = Util.require_text(@options[:name], 'Hyper-V VM name')
+            @transport = SSHTransport.new(@profile)
+            @source = HotSource.new(@transport, @options)
+            @dir = HotUtil.state_dir(@options, @operation_id)
+            @state_path = HotUtil.state_path(@options, @operation_id)
+        end
+
+        def preflight
+            validate_local_prerequisites!
+            metadata = @source.inspect(@vm_name, require_state: 'Running')
+            validate_target_mapping!(metadata); validate_local_capacity!(metadata); validate_opennebula_targets!(metadata)
+            { 'status' => 'ELIGIBLE', 'operation_id' => @operation_id, 'source_vm_id' => metadata['VMId'], 'metadata_digest' => HotUtil.digest(stable_metadata(metadata)) }.merge(source_inventory(metadata))
+        end
+
+        def source_inventory(metadata)
+            disks = Array(metadata['Disks'])
+            {
+                'source_disk_bytes' => disks.sum { |disk| Integer(disk['VirtualSize']) },
+                'source_nic_count' => Array(metadata['NICs']).length,
+                'source_state' => metadata['State'].to_s,
+                'generation' => Integer(metadata['Generation']),
+                'secure_boot' => Util.bool(metadata['SecureBoot'])
+            }
+        rescue ArgumentError, TypeError => e
+            raise Error, "invalid Hyper-V source inventory: #{e.message}"
+        end
+
+        def prepare
+            validate_local_prerequisites!
+            existing = HotUtil.load_state(@state_path)
+            if existing
+                validate_state_identity!(existing)
+                return existing if existing['phase'] == 'PREPARED'
+                raise Error, "cannot prepare Hyper-V hot migration from phase #{existing['phase']}"
+            end
+            metadata = @source.inspect(@vm_name, require_state: 'Running')
+            validate_target_mapping!(metadata); validate_local_capacity!(metadata); validate_opennebula_targets!(metadata)
+            reference = @source.create_and_export_reference(@vm_name, @operation_id, metadata, consistency: 1)
+            FileUtils.mkdir_p(@dir, mode: 0o700)
+            exports = @source.download_exports(reference, metadata, File.join(@dir, 'exports'), timeout: positive_timeout(:hyperv_transfer_timeout))
+            converted = Converter.new(@options.merge(:format => 'raw')).convert(@vm_name, metadata, exports, @dir)
+            raise Error, "virt-v2v produced #{converted.length} disks; expected #{Array(metadata['Disks']).length}" unless converted.length == Array(metadata['Disks']).length
+            prepared = converted.sort.each_with_index.map do |path, index|
+                expected = Integer(metadata['Disks'][index]['VirtualSize'])
+                raise Error, "prepared RAW disk #{index} size #{File.size(path)} does not match source virtual size #{expected}" unless File.size(path) == expected
+                dest = File.join(@dir, format('prepared-%02d.raw', index)); FileUtils.mv(path, dest) unless File.expand_path(path) == File.expand_path(dest)
+                { 'path' => dest, 'virtual_size' => expected }
+            end
+            rct_by_path = Array(reference['RCT']).each_with_object({}) { |r, out| out[File.expand_path(r['Path'].to_s).downcase] = r }
+            disks = Array(metadata['Disks']).each_with_index.map do |disk, index|
+                rct = rct_by_path[File.expand_path(disk['Path'].to_s).downcase]
+                raise Error, "missing RCT id for source disk #{disk['Path']}" unless rct
+                { 'index'=>index,'source_path'=>disk['Path'],'virtual_disk_id'=>disk['VirtualDiskId'],'virtual_size'=>Integer(disk['VirtualSize']),'controller_type'=>disk['ControllerType'],'controller_number'=>Integer(disk['ControllerNumber']),'controller_location'=>Integer(disk['ControllerLocation']),'rct_id'=>rct['RCTId'],'virtual_disk_identifier'=>rct['VirtualDiskIdentifier'],'prepared_raw_path'=>prepared[index]['path'] }
+            end
+            state = { 'version'=>HOT_STATE_VERSION,'operation_id'=>@operation_id,'vm_name'=>@vm_name,'source_vm_id'=>metadata['VMId'],'source_host'=>@profile.host,'phase'=>'PREPARED','created_at'=>Time.now.utc.iso8601,'metadata_digest'=>HotUtil.digest(stable_metadata(metadata)),'metadata'=>metadata,'reference_point_id'=>reference['ReferencePointId'],'reference_consistency_level'=>reference['ConsistencyLevel'],'remote_export_dir'=>reference['RemoteExportDir'],'disks'=>disks,'target_digest'=>target_digest }
+            HotUtil.write_json_atomic(@state_path, state); state
+        end
+
+        def commit
+            validate_local_prerequisites!
+            state, = HotUtil.require_state!(@options, phase: %w[PREPARED CUTOVER_STARTED SOURCE_OFF DELTA_APPLIED IMPORTED])
+            validate_state_identity!(state); return state if state['phase'] == 'IMPORTED'
+            if state['phase'] == 'PREPARED'
+                metadata = @source.inspect(@vm_name, require_state: 'Running')
+                validate_target_mapping!(metadata); validate_opennebula_targets!(metadata); verify_prepared_drift!(state, metadata); @source.assert_reference_exists!(state)
+                state['phase']='CUTOVER_STARTED'; state['cutover_started_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+            end
+            if state['phase'] == 'CUTOVER_STARTED'
+                @source.power_off!(@vm_name, timeout: (@options[:shutdown_timeout] || 300).to_i)
+                metadata=@source.inspect(@vm_name, require_state:'Off'); verify_prepared_drift!(state,metadata)
+                state['phase']='SOURCE_OFF'; state['source_off_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+            end
+            if state['phase'] == 'SOURCE_OFF'
+                bundles=@source.create_delta_bundles!(state,File.join(@dir,'deltas'),timeout:positive_timeout(:hyperv_transfer_timeout))
+                state['disks'].each_with_index{|disk,index| DeltaApplier.apply!(bundles[index],disk['prepared_raw_path'],Integer(disk['virtual_size']))}
+                rerun_v2v_in_place!(state)
+                state['phase']='DELTA_APPLIED'; state['delta_applied_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+            end
+            if state['phase'] == 'DELTA_APPLIED'
+                images=@helper.create_one_images(state['disks'].map{|disk| disk['prepared_raw_path']})
+                template=@helper.hyperv_vm_template(state['metadata'],images); rc=template.allocate(template.to_xml)
+                raise Error, "failed to allocate OpenNebula hot-migration template #{@vm_name.inspect}: #{rc.message}" if OpenNebula.is_error?(rc)
+                if @helper.respond_to?(:chown_one_object,true) && @helper.respond_to?(:resolve_one_ownership,true); @helper.send(:chown_one_object,template,*@helper.send(:resolve_one_ownership)); end
+                state['template_id']=template.id.to_i; state['phase']='IMPORTED'; state['imported_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+            end
+            state
+        end
+
+        def cleanup
+            state,=HotUtil.require_state!(@options); validate_state_identity!(state)
+            raise Error, "refusing hot-migration cleanup after cutover phase #{state['phase']}; preserve evidence and reconcile target/source state" if %w[CUTOVER_STARTED SOURCE_OFF DELTA_APPLIED IMPORTED].include?(state['phase'])
+            @source.destroy_reference!(state); FileUtils.rm_rf(@dir); { 'status'=>'CLEANED','operation_id'=>@operation_id }
+        end
+
+        def finalize_success
+            state,=HotUtil.require_state!(@options,phase:'IMPORTED'); validate_state_identity!(state); @source.destroy_reference!(state)
+            state['phase']='DONE'; state['completed_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state); state
+        end
+
+        private
+
+        def resolve_hot_options(options)
+            connection_id=options[:hyperv_connection].to_s.strip; profiles=Util.fetch(options,:hyperv_connections)||{}; profile=connection_id.empty? ? {} : (Util.fetch(profiles,connection_id)||{})
+            merged=options.dup; merged[:hyperv_staging_dir]=Util.fetch(profile,:staging_dir)||options[:hyperv_staging_dir]; merged[:shutdown_timeout]||=Util.fetch(profile,:shutdown_timeout); merged[:hyperv_transfer_timeout]||=Util.fetch(profile,:transfer_timeout); merged[:hyperv_prepare_timeout]||=Util.fetch(profile,:prepare_timeout); merged[:hyperv_delta_timeout]||=Util.fetch(profile,:delta_timeout); merged
+        end
+
+        def validate_local_prerequisites!
+            raise Error, 'Hyper-V hot migration requires an explicit OpenNebula Image Datastore' if @options[:datastore].to_s.strip.empty?
+            HotUtil.executable!(@options[:v2v_path]||'virt-v2v','virt-v2v'); @options[:v2v_in_place_path]||='virt-v2v-in-place'; HotUtil.executable!(@options[:v2v_in_place_path],'virt-v2v-in-place')
+            raise Error, 'Hyper-V hot migration uses RAW prepared disks so RCT byte ranges can be applied safely' if @options[:format] && @options[:format].to_s!='' && @options[:format].to_s!='raw'
+            FileUtils.mkdir_p(@dir,mode:0o700); free=local_free_bytes(@dir); raise Error, 'unable to determine free space on local hot-migration workspace' unless free&&free>0
+        end
+
+        def validate_target_mapping!(metadata)
+            networks=@options[:network].to_s.split(',').map(&:strip).reject(&:empty?); nics=Array(metadata['NICs'])
+            if nics.any?; raise Error, 'target OpenNebula network mapping is required for every Hyper-V NIC' if networks.empty?; raise Error, "target network count #{networks.length} must be 1 or equal source NIC count #{nics.length}" unless networks.length==1||networks.length==nics.length; networks.each{|id| raise Error,"invalid target OpenNebula network id #{id.inspect}" unless id.match?(/\A\d+\z/)}; end
+            raise Error, 'Generation 2 hot migration requires a configured UEFI firmware path' if Integer(metadata['Generation'])==2 && firmware_path(metadata).to_s.strip.empty?; true
+        end
+
+        def firmware_path(metadata); secure=Util.bool(metadata['SecureBoot']); @options[secure ? :uefi_sec_path : :uefi_path]||(secure ? '/usr/share/OVMF/OVMF_CODE_4M.secboot.fd':'/usr/share/OVMF/OVMF_CODE_4M.fd'); end
+
+        def stable_metadata(metadata)
+            {'Name'=>metadata['Name'],'VMId'=>metadata['VMId'],'Generation'=>metadata['Generation'],'ProcessorCount'=>metadata['ProcessorCount'],'MemoryStartupBytes'=>metadata['MemoryStartupBytes'],'DynamicMemoryEnabled'=>metadata['DynamicMemoryEnabled'],'MemoryMinimumBytes'=>metadata['MemoryMinimumBytes'],'MemoryMaximumBytes'=>metadata['MemoryMaximumBytes'],'AutomaticCheckpointsEnabled'=>metadata['AutomaticCheckpointsEnabled'],'ExposeVirtualizationExtensions'=>metadata['ExposeVirtualizationExtensions'],'HostBuildNumber'=>metadata['HostBuildNumber'],'AssignableDevices'=>Array(metadata['AssignableDevices']),'GpuPartitionAdapters'=>Array(metadata['GpuPartitionAdapters']),'FibreChannelAdapters'=>Array(metadata['FibreChannelAdapters']),'TpmEnabled'=>metadata['TpmEnabled'],'Shielded'=>metadata['Shielded'],'SecureBoot'=>metadata['SecureBoot'],'Disks'=>Array(metadata['Disks']).map{|d| {'Path'=>d['Path'],'ControllerType'=>d['ControllerType'],'ControllerNumber'=>d['ControllerNumber'],'ControllerLocation'=>d['ControllerLocation'],'VhdFormat'=>d['VhdFormat'],'VhdType'=>d['VhdType'],'ParentPath'=>d['ParentPath'],'VirtualDiskId'=>d['VirtualDiskId'],'VirtualSize'=>d['VirtualSize']}},'NICs'=>Array(metadata['NICs']).map{|n| {'Name'=>n['Name'],'SwitchName'=>n['SwitchName'],'MacAddress'=>n['MacAddress'],'VlanMode'=>n['VlanMode'],'AccessVlanId'=>n['AccessVlanId'],'NativeVlanId'=>n['NativeVlanId']}}}
+        end
+
+        def validate_local_capacity!(metadata)
+            required=Array(metadata['Disks']).sum{|disk| Integer(disk['VirtualSize'])}; minimum=(required*2.1).ceil; free=local_free_bytes(@dir)
+            raise Error,'unable to determine free space on local hot-migration workspace' unless free&&free>0; raise Error,"local hot-migration workspace free space #{free} is below conservative requirement #{minimum}" if free<minimum
+        end
+
+        def validate_opennebula_targets!(metadata)
+            client=@helper.instance_variable_get(:@client); raise Error,'OpenNebula client is unavailable for target preflight' unless client
+            datastore_ids=@options[:datastore].to_s.split(',').map(&:strip).reject(&:empty?); disk_count=Array(metadata['Disks']).length; raise Error,"Image Datastore count #{datastore_ids.length} must be 1 or equal disk count #{disk_count}" unless datastore_ids.length==1||datastore_ids.length==disk_count
+            datastore_ids.uniq.each{|raw| id=Integer(raw); raise Error,"invalid OpenNebula Image Datastore id #{raw.inspect}" if id.negative?; ds=OpenNebula::Datastore.new(OpenNebula::Datastore.build_xml(id),client); rc=ds.info; raise Error,"OpenNebula Image Datastore #{id} is unavailable: #{rc.message}" if OpenNebula.is_error?(rc)}
+            @options[:network].to_s.split(',').map(&:strip).reject(&:empty?).uniq.each{|raw| id=Integer(raw); raise Error,"invalid OpenNebula VNet id #{raw.inspect}" if id.negative?; vn=OpenNebula::VirtualNetwork.new(OpenNebula::VirtualNetwork.build_xml(id),client); rc=vn.info; raise Error,"OpenNebula VNet #{id} is unavailable: #{rc.message}" if OpenNebula.is_error?(rc)}
+        rescue ArgumentError
+            raise Error,'OpenNebula target datastore/network ids must be non-negative integers'
+        end
+
+        def target_digest; HotUtil.digest({'datastore'=>@options[:datastore].to_s,'network'=>@options[:network].to_s,'cluster'=>@options[:one_cluster],'host'=>@options[:one_host],'sys_ds'=>@options[:one_datastore],'ds_cluster'=>@options[:one_datastore_cluster],'uefi'=>@options[:uefi_path],'uefi_secure'=>@options[:uefi_sec_path]}); end
+
+        def verify_prepared_drift!(state,metadata)
+            raise Error,'source VM identity changed since hot prepare' unless metadata['VMId'].to_s.casecmp(state['source_vm_id'].to_s).zero?; raise Error,'target migration parameters changed since hot prepare' unless target_digest==state['target_digest']; raise Error,'Hyper-V source topology/capability changed since hot prepare; cutover is blocked' unless HotUtil.digest(stable_metadata(metadata))==state['metadata_digest']
+            state['disks'].each{|disk| path=disk['prepared_raw_path']; raise Error,"prepared RAW disk is missing: #{path}" unless File.file?(path); raise Error,"prepared RAW disk size drifted: #{path}" unless File.size(path)==Integer(disk['virtual_size'])}; true
+        end
+
+        def rerun_v2v_in_place!(state)
+            xml=File.join(@dir,'final-libvirt.xml'); raw_paths=state['disks'].map{|disk| disk['prepared_raw_path']}; File.open(xml,'w',0o600){|file| file.write(Converter.new(@options.merge(:format=>'raw')).libvirt_xml(@vm_name,state['metadata'],raw_paths))}
+            env={}; libguestfs=@options[:libguestfs_path].to_s.strip; env['LIBGUESTFS_PATH']=libguestfs unless libguestfs.empty?; binary=@options[:v2v_in_place_path]||'virt-v2v-in-place'; stdout,stderr,status=Open3.capture3(env,binary,'-v','--machine-readable','-i','libvirtxml',xml,'--root',(@options[:root]||'first').to_s); $stdout.write(stdout) unless stdout.empty?; $stderr.write(stderr) unless stderr.empty?; raise Error,'virt-v2v-in-place failed after source shutdown; prepared target disks are now UNKNOWN and source must remain OFF' unless status.success?
+        end
+
+        def local_free_bytes(path); stdout,_stderr,status=Open3.capture3('df','-Pk',path); return nil unless status.success?; fields=stdout.lines.last.to_s.split; return nil if fields.length<4; Integer(fields[3])*1024 rescue nil; end
+        def positive_timeout(name); value=@options[name].to_i; value>0 ? value : nil; end
+        def validate_state_identity!(state); raise Error,'prepared Hyper-V hot state belongs to a different VM' unless state['vm_name']==@vm_name; raise Error,'prepared Hyper-V hot state belongs to a different source host' unless state['source_host'].to_s.casecmp(@profile.host).zero?; end
+    end
+end
+
+class OneSwapHelper
+    def hyperv_hot_preflight(vm_name, options); OneSwapHyperV::HotCoordinator.new(self,options.merge(:name=>vm_name)).preflight; end
+    def hyperv_hot_prepare(vm_name, options); OneSwapHyperV::HotCoordinator.new(self,options.merge(:name=>vm_name,:format=>'raw')).prepare; end
+    def hyperv_hot_commit(vm_name, options)
+        options=options.merge(:name=>vm_name,:format=>'raw'); @options=options; @options[:name]=vm_name; @options[:context]||='/usr/share/one/context'; @options[:virt_tools]||='/usr/local/share/virt-tools'; @options[:img_wait]||=120; @options[:context_min_free]||=1024; @options[:context_timeout]||=600; @hyperv_source_host=OneSwapHyperV::ConnectionProfile.from_options(options).host; OneSwapHyperV::HotCoordinator.new(self,options).commit
+    end
+    def hyperv_hot_cleanup(vm_name, options); OneSwapHyperV::HotCoordinator.new(self,options.merge(:name=>vm_name)).cleanup; end
+    def hyperv_hot_finalize_success(vm_name, options); OneSwapHyperV::HotCoordinator.new(self,options.merge(:name=>vm_name)).finalize_success; end
+end
+) {
                         $controller=[int]$Matches[1]
                         $location=[int]$Matches[2]
                         foreach ($disk in $sourceDisks) {
