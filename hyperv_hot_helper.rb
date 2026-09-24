@@ -267,13 +267,24 @@ module OneSwapHyperV
             op64 = Base64.strict_encode64(operation_id.encode(Encoding::UTF_8))
             result = @transport.powershell_json(reference_prepare_script(name64, staging64, op64, consistency), timeout: (@options[:hyperv_prepare_timeout] || 7200).to_i)
             raise Error, 'reference-point export returned no disks' if Array(result['ExportedDisks']).empty?
-            if Integer(result['ConsistencyLevel']) != 1
-                raise Error, "reference point is not application-consistent (level #{result['ConsistencyLevel']})"
-            end
+            validate_baseline_consistency!(result)
             if Array(result['RCT']).length != Array(metadata['Disks']).length
                 raise Error, 'RCT identifier count does not match Hyper-V source disk count'
             end
             result
+        end
+
+        # The prepared baseline itself may be application-consistent (1) or crash-consistent (2).
+        # This is safe for the warm path because cutover is never performed from the baseline alone:
+        # commit requires a graceful guest shutdown first, then applies the final RCT delta before
+        # virt-v2v-in-place/import. Unknown consistency values remain fail-closed.
+        def validate_baseline_consistency!(result)
+            level = Integer(result.fetch('ConsistencyLevel'))
+            raise Error, "unsupported Hyper-V reference-point consistency level #{level}" unless [1, 2].include?(level)
+
+            level
+        rescue KeyError, ArgumentError, TypeError => e
+            raise Error, "invalid Hyper-V reference-point consistency level: #{e.message}"
         end
 
         def download_exports(reference, metadata, local_dir, timeout: nil)
