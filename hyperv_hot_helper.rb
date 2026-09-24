@@ -404,9 +404,11 @@ module OneSwapHyperV
                     $prefix='\\'+$server.ToUpper()+'\'+$CimInstance.CimSystemProperties.Namespace.Replace('/','\')+':'+$CimInstance.CimSystemProperties.ClassName
                     if ($keys.Count -eq 0) { return $prefix+'=@' }
                     $pairs=@()
+                    $slash=[string][char]92
                     foreach ($key in $keys) {
                         $value=[string]$CimInstance.$key
-                        $pairs += ($key+'="'+$value.Replace('\','\\').Replace('"','\"')+'"')
+                        $escapedValue=$value.Replace($slash,$slash+$slash).Replace('"',$slash+'"')
+                        $pairs += ($key+'="'+$escapedValue+'"')
                     }
                     return $prefix+'.'+($pairs -join ',')
                 }
