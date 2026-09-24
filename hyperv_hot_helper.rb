@@ -324,7 +324,7 @@ module OneSwapHyperV
                 $vm=Get-VM -Name $name -ErrorAction Stop
                 if ([string]$vm.State -eq 'Off') { [pscustomobject]@{State='Off';AlreadyOff=$true}|ConvertTo-Json -Compress; exit 0 }
                 if ([string]$vm.State -ne 'Running') { throw "source VM must be Running immediately before cutover; state=$($vm.State)" }
-                Stop-VM -VM $vm -Shutdown -ErrorAction Stop
+                Stop-VM -VM $vm -ErrorAction Stop
                 $deadline=(Get-Date).AddSeconds(#{timeout.to_i})
                 do {
                     Start-Sleep -Seconds 2
