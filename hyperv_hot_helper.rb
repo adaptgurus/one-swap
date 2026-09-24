@@ -21,12 +21,13 @@ module OneSwapHyperV
 
     class SSHTransport
         def stream_powershell(script, local_path, timeout: nil)
-            argv = send(:ssh_argv, script)
+            argv, stdin_data = send(:powershell_invocation, script)
             FileUtils.mkdir_p(File.dirname(local_path))
             stderr_text = +''
             status = nil
             runner = proc do
                 Open3.popen3(*argv) do |stdin, stdout, stderr, wait_thr|
+                    stdin.write(stdin_data) if stdin_data
                     stdin.close
                     stderr_thread = Thread.new { stderr.read.to_s }
                     File.open(local_path, 'wb', 0o600) { |file| IO.copy_stream(stdout, file) }
