@@ -21,12 +21,13 @@ module OneSwapHyperV
 
     class SSHTransport
         def stream_powershell(script, local_path, timeout: nil)
-            argv = send(:ssh_argv, script)
+            argv, stdin_data = send(:powershell_invocation, script)
             FileUtils.mkdir_p(File.dirname(local_path))
             stderr_text = +''
             status = nil
             runner = proc do
                 Open3.popen3(*argv) do |stdin, stdout, stderr, wait_thr|
+                    stdin.write(stdin_data) if stdin_data
                     stdin.close
                     stderr_thread = Thread.new { stderr.read.to_s }
                     File.open(local_path, 'wb', 0o600) { |file| IO.copy_stream(stdout, file) }
@@ -266,8 +267,16 @@ module OneSwapHyperV
             op64 = Base64.strict_encode64(operation_id.encode(Encoding::UTF_8))
             result = @transport.powershell_json(reference_prepare_script(name64, staging64, op64, consistency), timeout: (@options[:hyperv_prepare_timeout] || 7200).to_i)
             raise Error, 'reference-point export returned no disks' if Array(result['ExportedDisks']).empty?
-            if Integer(result['ConsistencyLevel']) != 1
-                raise Error, "reference point is not application-consistent (level #{result['ConsistencyLevel']})"
+            consistency_level = Integer(result['ConsistencyLevel'])
+            guest_os = @options[:guest_os].to_s.downcase
+            allowed_levels = guest_os == 'linux' ? [1, 2] : [1]
+            unless allowed_levels.include?(consistency_level)
+                raise Error, "reference point consistency level #{consistency_level} is not qualified for guest OS #{guest_os.empty? ? 'unknown' : guest_os}"
+            end
+            if consistency_level == 2
+                result['BaselineConsistency'] = 'CRASH_CONSISTENT'
+            else
+                result['BaselineConsistency'] = 'APPLICATION_CONSISTENT'
             end
             if Array(result['RCT']).length != Array(metadata['Disks']).length
                 raise Error, 'RCT identifier count does not match Hyper-V source disk count'
@@ -368,12 +377,56 @@ module OneSwapHyperV
                 $ErrorActionPreference='Stop'
                 $ProgressPreference='SilentlyContinue'
                 [Console]::OutputEncoding=[Text.Encoding]::UTF8
-                function Wait-WmiJob([string]$jobPath) {
-                    $job=[wmi]$jobPath
-                    while ($job.JobState -eq 3 -or $job.JobState -eq 4) { Start-Sleep 1; $job.Get() }
-                    if ($job.JobState -ne 7) { throw "Hyper-V WMI job failed state=$($job.JobState) error=$($job.ErrorDescription)" }
-                    return $job
+
+                function Wait-CimResult($result, [string]$label) {
+                    $rv=[int]$result.ReturnValue
+                    if ($rv -ne 0 -and $rv -ne 4096) { throw "$label failed return=$rv" }
+                    if ($rv -eq 4096) {
+                        if ($null -eq $result.Job) { throw "$label returned 4096 without a job" }
+                        $job=$result.Job | Get-CimInstance
+                        $deadline=(Get-Date).AddMinutes(30)
+                        while (($job.JobState -eq 3 -or $job.JobState -eq 4) -and (Get-Date) -lt $deadline) {
+                            Start-Sleep 1
+                            $job=$job | Get-CimInstance
+                        }
+                        if ($job.JobState -ne 7) {
+                            throw "$label job failed state=$($job.JobState) code=$($job.ErrorCode) error=$($job.ErrorDescription)"
+                        }
+                    }
+                    return $result
                 }
+
+                function ConvertTo-CimEmbeddedString {
+                    param([Parameter(ValueFromPipeline=$true)][Microsoft.Management.Infrastructure.CimInstance]$CimInstance)
+                    process {
+                        $serializer=[Microsoft.Management.Infrastructure.Serialization.CimSerializer]::Create()
+                        $bytes=$serializer.Serialize($CimInstance,[Microsoft.Management.Infrastructure.Serialization.InstanceSerializationOptions]::None)
+                        [Text.Encoding]::Unicode.GetString($bytes)
+                    }
+                }
+
+                function Get-CimInstancePath([Microsoft.Management.Infrastructure.CimInstance]$CimInstance) {
+                    $keys=@($CimInstance.CimClass.CimClassProperties | Where-Object {$_.Qualifiers.Name -contains 'key'} | Select-Object -ExpandProperty Name)
+                    $server=$CimInstance.CimSystemProperties.ServerName
+                    if ([string]::IsNullOrWhiteSpace($server)) { $server=$env:COMPUTERNAME }
+                    $prefix='\\'+$server.ToUpper()+'\'+$CimInstance.CimSystemProperties.Namespace.Replace('/','\')+':'+$CimInstance.CimSystemProperties.ClassName
+                    if ($keys.Count -eq 0) { return $prefix+'=@' }
+                    $pairs=@()
+                    $slash=[string][char]92
+                    foreach ($key in $keys) {
+                        $value=[string]$CimInstance.$key
+                        $escapedValue=$value.Replace($slash,$slash+$slash).Replace('"',$slash+'"')
+                        $pairs += ($key+'="'+$escapedValue+'"')
+                    }
+                    return $prefix+'.'+($pairs -join ',')
+                }
+
+                function Recovery-Snapshots($computerSystem) {
+                    @($computerSystem |
+                        Get-CimAssociatedInstance -Association Msvm_SnapshotOfVirtualSystem -ResultClassName Msvm_VirtualSystemSettingData |
+                        Where-Object {$_.VirtualSystemType -eq 'Microsoft:Hyper-V:Snapshot:Recovery'})
+                }
+
                 function Resolve-DiskPath([string]$instanceId, $sourceDisks) {
                     $escaped=$instanceId.Replace("'", "''")
                     $sad=Get-WmiObject -Namespace root/virtualization/v2 -Class Msvm_StorageAllocationSettingData -Filter "InstanceID='$escaped'" -ErrorAction SilentlyContinue
@@ -382,66 +435,191 @@ module OneSwapHyperV
                             $hr=[wmi]$sad.HostResource[0]
                             foreach ($prop in @('Path','Name','DeviceID')) {
                                 $value=[string]$hr.$prop
-                                if ($value -match '\\.vhdx$') { return $value }
+                                if ($value -match '\.vhdx$') { return $value }
                             }
                         } catch {}
                     }
                     foreach ($disk in $sourceDisks) {
                         if ($instanceId -like "*$($disk.VirtualDiskId)*") { return [string]$disk.Path }
                     }
+                    # The reference identifier commonly ends with controller/location/L.
+                    # Parse path segments with a literal backslash char so Ruby heredoc escaping cannot corrupt a regex.
+                    $parts=@($instanceId.Split([char]92) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                    if ($parts.Count -ge 3 -and $parts[$parts.Count-1] -eq 'L') {
+                        $controller=$null
+                        $location=$null
+                        try {
+                            $controller=[int]$parts[$parts.Count-3]
+                            $location=[int]$parts[$parts.Count-2]
+                        } catch {}
+                        if ($null -ne $controller -and $null -ne $location) {
+                            foreach ($disk in $sourceDisks) {
+                                if ([int]$disk.ControllerNumber -eq $controller -and [int]$disk.ControllerLocation -eq $location) {
+                                    return [string]$disk.Path
+                                }
+                            }
+                        }
+                    }
                     return $null
                 }
+
                 $name=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{name64}'))
                 $staging=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{staging64}'))
                 $op=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('#{op64}'))
                 $vm=Get-VM -Name $name -ErrorAction Stop
                 if ([string]$vm.State -ne 'Running') { throw "source VM must be Running during hot prepare; state=$($vm.State)" }
+
                 $sourceDisks=@(Get-VMHardDiskDrive -VM $vm | Sort-Object ControllerNumber,ControllerLocation | ForEach-Object {
                     $vhd=Get-VHD -Path $_.Path -ErrorAction Stop
-                    [pscustomobject]@{Path=$_.Path;VirtualDiskId=[string]$vhd.DiskIdentifier;VirtualSize=[int64]$vhd.Size}
+                    [pscustomobject]@{
+                        Path=$_.Path
+                        VirtualDiskId=[string]$vhd.DiskIdentifier
+                        VirtualSize=[int64]$vhd.Size
+                        ControllerNumber=[int]$_.ControllerNumber
+                        ControllerLocation=[int]$_.ControllerLocation
+                    }
                 })
+
                 $ns='root\\virtualization\\v2'
-                $svc=Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePointService
-                $cs=Get-WmiObject -Namespace $ns -Class Msvm_ComputerSystem -Filter "Name='$($vm.VMId.Guid)'"
-                $before=@(Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | ForEach-Object {$_.InstanceID})
-                $settingClass=Get-WmiObject -Namespace $ns -List | Where-Object {$_.Name -eq 'Msvm_VirtualSystemReferencePointSettingData'}
-                if ($null -eq $settingClass) { throw 'Msvm_VirtualSystemReferencePointSettingData unavailable' }
-                $setting=$settingClass.CreateInstance(); $setting.ConsistencyLevel=[byte]#{consistency.to_i}
-                $created=$svc.CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)
-                if ($created.ReturnValue -eq 4096) { Wait-WmiJob $created.Job | Out-Null }
-                elseif ($created.ReturnValue -ne 0) { throw "CreateReferencePoint failed code=$($created.ReturnValue)" }
-                $refs=@(Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | Where-Object {$before -notcontains $_.InstanceID})
-                if ($refs.Count -ne 1) { throw "expected exactly one new RCT reference point; found $($refs.Count)" }
-                $ref=$refs[0]
-                if ($ref.VirtualDiskIdentifiers.Count -ne $ref.ResilientChangeTrackingIdentifiers.Count) { throw 'RCT reference point disk/id arrays differ in size' }
-                $rct=@()
-                for ($i=0;$i -lt $ref.VirtualDiskIdentifiers.Count;$i++) {
-                    $path=Resolve-DiskPath ([string]$ref.VirtualDiskIdentifiers[$i]) $sourceDisks
-                    if ([string]::IsNullOrWhiteSpace($path)) { throw "unable to map RCT disk identifier $($ref.VirtualDiskIdentifiers[$i]) to a source VHDX" }
-                    $rct += [pscustomobject]@{Path=$path;VirtualDiskIdentifier=[string]$ref.VirtualDiskIdentifiers[$i];RCTId=[string]$ref.ResilientChangeTrackingIdentifiers[$i]}
-                }
+                $cs=Get-CimInstance -Namespace $ns -ClassName Msvm_ComputerSystem -Filter "Name='$($vm.VMId.Guid)'"
+                if ($null -eq $cs) { throw 'Hyper-V computer system was not found' }
+                $snapshotSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemSnapshotService
+                $managementSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemManagementService
+                $referenceSvc=Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemReferencePointService
+
+                $beforeSnapshots=@(Recovery-Snapshots $cs | ForEach-Object {$_.InstanceID})
+                $beforeRefs=@(Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | ForEach-Object {$_.InstanceID})
                 $exportDir=Join-Path $staging ('layersentry-hot-'+($op -replace '[^A-Za-z0-9_.-]','_'))
-                if (Test-Path -LiteralPath $exportDir) {
-                    if ((Get-ChildItem -LiteralPath $exportDir -Force | Measure-Object).Count -gt 0) { throw "staging directory already contains data: $exportDir" }
-                } else { New-Item -ItemType Directory -Path $exportDir -Force | Out-Null }
-                $exportSettingClass=Get-WmiObject -Namespace $ns -List | Where-Object {$_.Name -eq 'Msvm_VirtualSystemReferencePointExportSettingData'}
-                if ($null -eq $exportSettingClass) { throw 'reference point export settings class unavailable' }
-                $exportSetting=$exportSettingClass.CreateInstance()
-                $exp=$svc.ExportReferencePoint($ref,$exportDir,$exportSetting.GetText(1))
-                $job=$null
-                if ($exp.ReturnValue -eq 4096) { $job=Wait-WmiJob $exp.Job }
-                elseif ($exp.ReturnValue -ne 0) { throw "ExportReferencePoint failed code=$($exp.ReturnValue)" }
-                $paths=@()
-                if ($null -ne $job -and $job.PSObject.Properties.Name -contains 'ExportedDisks') { $paths=@($job.ExportedDisks) }
-                if ($paths.Count -eq 0) { $paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter '*.vhdx' | ForEach-Object {$_.FullName}) }
-                $exports=@($paths | ForEach-Object {
-                    $vhd=Get-VHD -Path $_ -ErrorAction Stop
-                    $item=Get-Item -LiteralPath $_ -ErrorAction Stop
-                    $hash=Get-FileHash -LiteralPath $_ -Algorithm SHA256 -ErrorAction Stop
-                    [pscustomobject]@{Path=$_;VirtualDiskId=[string]$vhd.DiskIdentifier;VirtualSize=[int64]$vhd.Size;FileSize=[int64]$item.Length;SHA256=$hash.Hash.ToLowerInvariant()}
-                })
-                if ($exports.Count -ne $sourceDisks.Count) { throw "reference export produced $($exports.Count) disks; expected $($sourceDisks.Count)" }
-                [pscustomobject]@{ReferencePointId=$ref.InstanceID;ConsistencyLevel=[int]$ref.ConsistencyLevel;RemoteExportDir=$exportDir;RCT=$rct;ExportedDisks=$exports} | ConvertTo-Json -Depth 8 -Compress
+                $snapshot=$null
+                $ref=$null
+                $snapshotConverted=$false
+                $prepareComplete=$false
+
+                try {
+                    if (Test-Path -LiteralPath $exportDir) {
+                        if ((Get-ChildItem -LiteralPath $exportDir -Force | Measure-Object).Count -gt 0) { throw "staging directory already contains data: $exportDir" }
+                    } else {
+                        New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
+                    }
+
+                    # Microsoft Hyper-V backup sequence:
+                    # 1. Create a recovery/backup snapshot (32768).
+                    # 2. Export that recovery snapshot with ExportSystemDefinition.
+                    # 3. Convert the recovery snapshot to an RCT reference point.
+                    $snapshotSettings=Get-CimClass -Namespace $ns -ClassName Msvm_VirtualSystemSnapshotSettingData |
+                        New-CimInstance -ClientOnly -Property @{
+                            ConsistencyLevel=[uint16]#{consistency.to_i}
+                            IgnoreNonSnapshottableDisks=$true
+                        }
+                    $create=$snapshotSvc | Invoke-CimMethod -MethodName CreateSnapshot -Arguments @{
+                        AffectedSystem=$cs
+                        SnapshotSettings=($snapshotSettings | ConvertTo-CimEmbeddedString)
+                        SnapshotType=[uint16]32768
+                    }
+                    Wait-CimResult $create 'Create recovery backup checkpoint' | Out-Null
+                    $newSnapshots=@(Recovery-Snapshots $cs | Where-Object {$beforeSnapshots -notcontains $_.InstanceID})
+                    if ($newSnapshots.Count -ne 1) { throw "expected exactly one new recovery checkpoint; found $($newSnapshots.Count)" }
+                    $snapshot=$newSnapshots[0]
+
+                    $exportSettings=@($cs |
+                        Get-CimAssociatedInstance -Association Msvm_SystemExportSettingData -ResultClassName Msvm_VirtualSystemExportSettingData)
+                    if ($exportSettings.Count -lt 1) { throw 'Msvm_VirtualSystemExportSettingData unavailable' }
+                    $exportSetting=$exportSettings[0]
+                    $exportSetting.CopySnapshotConfiguration=[uint16]3
+                    $exportSetting.CopyVmRuntimeInformation=$false
+                    $exportSetting.CopyVmStorage=$true
+                    $exportSetting.CreateVmExportSubdirectory=$false
+                    $exportSetting.SnapshotVirtualSystem=Get-CimInstancePath $snapshot
+                    $exportSetting.DifferentialBackupBase=$null
+                    $exportSetting.BackupIntent=[uint16]0
+
+                    $export=$managementSvc | Invoke-CimMethod -MethodName ExportSystemDefinition -Arguments @{
+                        ComputerSystem=$cs
+                        ExportDirectory=$exportDir
+                        ExportSettingData=($exportSetting | ConvertTo-CimEmbeddedString)
+                    }
+                    Wait-CimResult $export 'Export recovery backup checkpoint' | Out-Null
+
+                    $paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter '*.vhdx' | ForEach-Object {$_.FullName})
+                    $exports=@($paths | ForEach-Object {
+                        $vhd=Get-VHD -Path $_ -ErrorAction Stop
+                        $item=Get-Item -LiteralPath $_ -ErrorAction Stop
+                        $hash=Get-FileHash -LiteralPath $_ -Algorithm SHA256 -ErrorAction Stop
+                        [pscustomobject]@{
+                            Path=$_
+                            VirtualDiskId=[string]$vhd.DiskIdentifier
+                            VirtualSize=[int64]$vhd.Size
+                            FileSize=[int64]$item.Length
+                            SHA256=$hash.Hash.ToLowerInvariant()
+                        }
+                    })
+                    if ($exports.Count -ne $sourceDisks.Count) { throw "backup export produced $($exports.Count) VHDX disks; expected $($sourceDisks.Count)" }
+
+                    $convert=$snapshotSvc | Invoke-CimMethod -MethodName ConvertToReferencePoint -Arguments @{
+                        AffectedSnapshot=$snapshot
+                    }
+                    Wait-CimResult $convert 'Convert recovery checkpoint to reference point' | Out-Null
+                    $snapshotConverted=$true
+
+                    $refs=@(Get-CimInstance -Namespace $ns -ClassName Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" |
+                        Where-Object {$beforeRefs -notcontains $_.InstanceID})
+                    if ($refs.Count -ne 1) { throw "expected exactly one new RCT reference point after conversion; found $($refs.Count)" }
+                    $ref=$refs[0]
+
+                    $virtualDiskIds=@($ref.VirtualDiskIdentifiers)
+                    $rctIds=@($ref.ResilientChangeTrackingIdentifiers)
+                    if ([int]$ref.ReferencePointType -ne 2) {
+                        throw "converted recovery checkpoint produced non-RCT reference type $($ref.ReferencePointType)"
+                    }
+                    if ([bool]$ref.HasAssociatedData) {
+                        throw 'converted RCT reference point unexpectedly has associated log data'
+                    }
+                    if ($virtualDiskIds.Count -ne $sourceDisks.Count) {
+                        throw "RCT reference point has $($virtualDiskIds.Count) disk identifiers; expected $($sourceDisks.Count)"
+                    }
+                    if ($rctIds.Count -ne $virtualDiskIds.Count) {
+                        throw "RCT reference point disk/id arrays differ after conversion: disks=$($virtualDiskIds.Count) rct=$($rctIds.Count)"
+                    }
+
+                    $rct=@()
+                    for ($i=0;$i -lt $virtualDiskIds.Count;$i++) {
+                        $rctId=[string]$rctIds[$i]
+                        if ([string]::IsNullOrWhiteSpace($rctId)) { throw "converted RCT identifier is empty for disk index $i" }
+                        $path=Resolve-DiskPath ([string]$virtualDiskIds[$i]) $sourceDisks
+                        if ([string]::IsNullOrWhiteSpace($path)) { throw "unable to map converted RCT disk identifier $($virtualDiskIds[$i]) to a source VHDX" }
+                        $rct += [pscustomobject]@{
+                            Path=$path
+                            VirtualDiskIdentifier=[string]$virtualDiskIds[$i]
+                            RCTId=$rctId
+                        }
+                    }
+
+                    $prepareComplete=$true
+                    [pscustomobject]@{
+                        ReferencePointId=$ref.InstanceID
+                        ConsistencyLevel=[int]$ref.ConsistencyLevel
+                        RemoteExportDir=$exportDir
+                        RCT=$rct
+                        ExportedDisks=$exports
+                    } | ConvertTo-Json -Depth 8 -Compress
+                } finally {
+                    if (-not $prepareComplete) {
+                        if ($null -ne $ref) {
+                            try {
+                                $destroy=$referenceSvc | Invoke-CimMethod -MethodName DestroyReferencePoint -Arguments @{AffectedReferencePoint=$ref}
+                                Wait-CimResult $destroy 'Rollback reference point' | Out-Null
+                            } catch {}
+                        } elseif ($null -ne $snapshot -and -not $snapshotConverted) {
+                            try {
+                                $destroySnapshot=$snapshotSvc | Invoke-CimMethod -MethodName DestroySnapshot -Arguments @{AffectedSnapshot=$snapshot}
+                                Wait-CimResult $destroySnapshot 'Rollback recovery checkpoint' | Out-Null
+                            } catch {}
+                        }
+                        if ($exportDir -and (Test-Path -LiteralPath $exportDir)) {
+                            Remove-Item -LiteralPath $exportDir -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
             POWERSHELL
         end
 

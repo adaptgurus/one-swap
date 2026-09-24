@@ -123,13 +123,15 @@ module OneSwapHyperV
     end
 
     class SSHTransport
+        POWERSHELL_ENCODED_COMMAND_MAX_BYTES = 6_000
+
         def initialize(profile)
             @profile = profile
         end
 
         def powershell(script, timeout: 120)
-            argv = ssh_argv(script)
-            stdout, stderr, status = run_capture(argv, timeout)
+            argv, stdin_data = powershell_invocation(script)
+            stdout, stderr, status = run_capture(argv, timeout, stdin_data)
             unless status.success?
                 detail = stderr.to_s.strip
                 detail = stdout.to_s.strip if detail.empty?
@@ -158,12 +160,13 @@ module OneSwapHyperV
                     $source.Dispose()
                 }
             POWERSHELL
-            argv = ssh_argv(script)
+            argv, stdin_data = powershell_invocation(script)
             FileUtils.mkdir_p(File.dirname(local_path))
             stderr_text = +''
             status = nil
             Timeout.timeout(timeout) do
                 Open3.popen3(*argv) do |stdin, stdout, stderr, wait_thr|
+                    stdin.write(stdin_data) if stdin_data
                     stdin.close
                     stderr_thread = Thread.new { stderr.read.to_s }
                     File.open(local_path, 'wb', 0o600) { |file| IO.copy_stream(stdout, file) }
@@ -184,29 +187,48 @@ module OneSwapHyperV
 
         private
 
-        def run_capture(argv, timeout)
+        def run_capture(argv, timeout, stdin_data = nil)
             result = nil
-            Timeout.timeout(timeout) { result = Open3.capture3(*argv) }
+            Timeout.timeout(timeout) do
+                result = if stdin_data
+                             Open3.capture3(*argv, stdin_data: stdin_data)
+                         else
+                             Open3.capture3(*argv)
+                         end
+            end
             result
         rescue Timeout::Error
             raise Error, "Hyper-V SSH/PowerShell operation timed out after #{timeout}s"
         end
 
-        def ssh_argv(script)
-            [
+        def powershell_invocation(script)
+            common = [
                 'ssh', '-T',
                 '-o', 'BatchMode=yes',
                 '-o', 'IdentitiesOnly=yes',
                 '-o', 'StrictHostKeyChecking=yes',
                 '-o', "UserKnownHostsFile=#{@profile.known_hosts}",
                 '-o', 'PasswordAuthentication=no',
+                '-o', 'ServerAliveInterval=15',
+                '-o', 'ServerAliveCountMax=4',
+                '-o', 'TCPKeepAlive=yes',
                 '-p', @profile.port.to_s,
                 '-i', @profile.identity_file,
                 @profile.destination,
                 'powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive',
-                '-ExecutionPolicy', 'Bypass',
-                '-EncodedCommand', Util.powershell_encoded(script)
+                '-ExecutionPolicy', 'Bypass'
             ]
+            encoded = Util.powershell_encoded(script)
+            if encoded.bytesize <= POWERSHELL_ENCODED_COMMAND_MAX_BYTES
+                [common + ['-EncodedCommand', encoded], nil]
+            else
+                bootstrap = <<~POWERSHELL
+                    $ErrorActionPreference = 'Stop'
+                    $payload = [Console]::In.ReadToEnd()
+                    & ([ScriptBlock]::Create($payload))
+                POWERSHELL
+                [common + ['-EncodedCommand', Util.powershell_encoded(bootstrap)], script.encode(Encoding::UTF_8)]
+            end
         end
     end
 
