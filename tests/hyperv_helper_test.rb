@@ -68,3 +68,18 @@ class HyperVSSHTransportCommandLengthTest < Minitest::Test
                     OneSwapHyperV::SSHTransport::POWERSHELL_ENCODED_COMMAND_MAX_BYTES
   end
 end
+
+class HyperVSSHKeepaliveTest < Minitest::Test
+  FakeProfile = Struct.new(:known_hosts, :port, :identity_file, :destination)
+
+  def test_powershell_transport_sets_bounded_ssh_keepalives
+    transport = OneSwapHyperV::SSHTransport.new(
+      FakeProfile.new('/tmp/known_hosts', 22, '/tmp/id_ed25519', 'user@host')
+    )
+    argv, = transport.send(:powershell_invocation, "Write-Output 'ok'")
+    joined = argv.join(' ')
+    assert_includes joined, 'ServerAliveInterval=15'
+    assert_includes joined, 'ServerAliveCountMax=4'
+    assert_includes joined, 'TCPKeepAlive=yes'
+  end
+end
