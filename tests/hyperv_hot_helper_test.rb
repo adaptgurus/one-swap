@@ -169,4 +169,19 @@ class HyperVHotHelperTest < Minitest::Test
     refute_includes source, "$rawPath='\\\\.\\\\PhysicalDrive'"
   end
 
+  def test_restart_safe_cutover_phases_and_physicaldrive_path
+    source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+
+    assert_includes source, 'DELTA_CAPTURING'
+    assert_includes source, 'MORPHING'
+    assert_includes source, 'IMPORTING'
+    assert_includes source, "state['phase'] = 'DELTA_CAPTURING'"
+    assert_includes source, "state['phase'] = 'MORPHING'"
+    assert_includes source, "state['phase'] = 'IMPORTING'"
+    assert_includes source, 'do not replay disk mutation automatically'
+    assert_includes source, 'reconcile OpenNebula images/template before retry'
+    assert_includes source, '[char]92'
+    assert_includes source, 'PhysicalDrive'
+  end
+
 end
