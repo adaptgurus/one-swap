@@ -99,17 +99,27 @@ class HyperVHotHelperTest < Minitest::Test
     assert_equal true, inventory['secure_boot']
   end
 
-  def test_reference_prepare_exports_before_rct_validation_and_cleans_failure
+  def test_reference_prepare_uses_backup_checkpoint_export_then_rct_conversion
     source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
-    export_pos = source.index('$exp=$svc.ExportReferencePoint')
+    create_pos = source.index("SnapshotType=[uint16]32768")
+    export_pos = source.index("Invoke-CimMethod -MethodName ExportSystemDefinition")
+    convert_pos = source.index("Invoke-CimMethod -MethodName ConvertToReferencePoint")
     rct_pos = source.index('$rctIds=@($ref.ResilientChangeTrackingIdentifiers)')
+    refute_nil create_pos
     refute_nil export_pos
+    refute_nil convert_pos
     refute_nil rct_pos
-    assert_operator export_pos, :<, rct_pos
+    assert_operator create_pos, :<, export_pos
+    assert_operator export_pos, :<, convert_pos
+    assert_operator convert_pos, :<, rct_pos
+    assert_includes source, 'CopySnapshotConfiguration=[uint16]3'
+    assert_includes source, 'CopyVmStorage=$true'
+    assert_includes source, "VirtualSystemType -eq 'Microsoft:Hyper-V:Snapshot:Recovery'"
     assert_includes source, '$paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter'
-    refute_includes source, '$paths=@($job.ExportedDisks)'
-    assert_includes source, '$destroy=$svc.DestroyReferencePoint($ref)'
-    assert_includes source, 'Hyper-V returned an empty RCT identifier for disk index'
+    assert_includes source, "Invoke-CimMethod -MethodName DestroySnapshot"
+    assert_includes source, "Invoke-CimMethod -MethodName DestroyReferencePoint"
+    assert_includes source, 'converted RCT identifier is empty for disk index'
+    refute_includes source, '$svc.ExportReferencePoint'
   end
 
 end
