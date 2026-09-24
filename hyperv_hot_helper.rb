@@ -14,7 +14,7 @@ require_relative 'hyperv_helper'
 
 module OneSwapHyperV
     HOT_STATE_VERSION = 1
-    HOT_PHASES = %w[PREPARED CUTOVER_STARTED SOURCE_OFF DELTA_APPLIED IMPORTED DONE].freeze
+    HOT_PHASES = %w[PREPARED CUTOVER_STARTED SOURCE_OFF DELTA_CAPTURING MORPHING DELTA_APPLIED IMPORTING IMPORTED DONE].freeze
     HOT_OPERATION_ID = /\A[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\z/
     HOT_QUERY_CHUNK = 512 * 1024 * 1024
     DELTA_MAGIC = 'LSHVDEL1'.b.freeze
@@ -791,37 +791,110 @@ module OneSwapHyperV
 
         def commit
             validate_local_prerequisites!
-            state, = HotUtil.require_state!(@options, phase: %w[PREPARED CUTOVER_STARTED SOURCE_OFF DELTA_APPLIED IMPORTED])
-            validate_state_identity!(state); return state if state['phase'] == 'IMPORTED'
+            state, = HotUtil.require_state!(
+                @options,
+                phase: %w[
+                    PREPARED CUTOVER_STARTED SOURCE_OFF DELTA_CAPTURING
+                    MORPHING DELTA_APPLIED IMPORTING IMPORTED
+                ]
+            )
+            validate_state_identity!(state)
+            return state if state['phase'] == 'IMPORTED'
+
+            if state['phase'] == 'MORPHING'
+                raise Error, 'Hyper-V hot migration is in MORPHING ambiguity state; do not replay disk mutation automatically'
+            end
+            if state['phase'] == 'IMPORTING'
+                raise Error, 'Hyper-V hot migration is in IMPORTING ambiguity state; reconcile OpenNebula images/template before retry'
+            end
+
             if state['phase'] == 'PREPARED'
                 metadata = @source.inspect(@vm_name, require_state: 'Running')
-                validate_target_mapping!(metadata); validate_opennebula_targets!(metadata); verify_prepared_drift!(state, metadata); @source.assert_reference_exists!(state)
-                state['phase']='CUTOVER_STARTED'; state['cutover_started_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+                validate_target_mapping!(metadata)
+                validate_opennebula_targets!(metadata)
+                verify_prepared_drift!(state, metadata)
+                @source.assert_reference_exists!(state)
+                state['phase'] = 'CUTOVER_STARTED'
+                state['cutover_started_at'] = Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
             end
+
             if state['phase'] == 'CUTOVER_STARTED'
                 @source.power_off!(@vm_name, timeout: (@options[:shutdown_timeout] || 300).to_i)
-                metadata=@source.inspect(@vm_name, require_state:'Off'); verify_prepared_drift!(state,metadata)
-                state['phase']='SOURCE_OFF'; state['source_off_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+                metadata = @source.inspect(@vm_name, require_state: 'Off')
+                verify_prepared_drift!(state, metadata)
+                state['phase'] = 'SOURCE_OFF'
+                state['source_off_at'] = Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
             end
+
             if state['phase'] == 'SOURCE_OFF'
-                bundles=@source.create_delta_bundles!(state,File.join(@dir,'deltas'),timeout:positive_timeout(:hyperv_transfer_timeout))
-                state['disks'].each_with_index{|disk,index| DeltaApplier.apply!(bundles[index],disk['prepared_raw_path'],Integer(disk['virtual_size']))}
+                state['phase'] = 'DELTA_CAPTURING'
+                state['delta_capture_started_at'] ||= Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
+            end
+
+            if state['phase'] == 'DELTA_CAPTURING'
+                bundles = @source.create_delta_bundles!(
+                    state,
+                    File.join(@dir, 'deltas'),
+                    timeout: positive_timeout(:hyperv_transfer_timeout)
+                )
+
+                # After this durable barrier, prepared RAW disks may be mutated.
+                # A crash in MORPHING must never be replayed automatically.
+                state['phase'] = 'MORPHING'
+                state['morphing_started_at'] ||= Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
+
+                state['disks'].each_with_index do |disk, index|
+                    DeltaApplier.apply!(
+                        bundles[index],
+                        disk['prepared_raw_path'],
+                        Integer(disk['virtual_size'])
+                    )
+                end
                 rerun_v2v_in_place!(state)
-                state['phase']='DELTA_APPLIED'; state['delta_applied_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+                state['phase'] = 'DELTA_APPLIED'
+                state['delta_applied_at'] = Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
             end
+
             if state['phase'] == 'DELTA_APPLIED'
-                images=@helper.create_one_images(state['disks'].map{|disk| disk['prepared_raw_path']})
-                template=@helper.hyperv_vm_template(state['metadata'],images); rc=template.allocate(template.to_xml)
-                raise Error, "failed to allocate OpenNebula hot-migration template #{@vm_name.inspect}: #{rc.message}" if OpenNebula.is_error?(rc)
-                if @helper.respond_to?(:chown_one_object,true) && @helper.respond_to?(:resolve_one_ownership,true); @helper.send(:chown_one_object,template,*@helper.send(:resolve_one_ownership)); end
-                state['template_id']=template.id.to_i; state['phase']='IMPORTED'; state['imported_at']=Time.now.utc.iso8601; HotUtil.write_json_atomic(@state_path,state)
+                # OpenNebula Image allocation is not safely replayable unless
+                # partial artifacts are reconciled first.
+                state['phase'] = 'IMPORTING'
+                state['importing_started_at'] ||= Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
+
+                images = @helper.create_one_images(
+                    state['disks'].map { |disk| disk['prepared_raw_path'] }
+                )
+                template = @helper.hyperv_vm_template(state['metadata'], images)
+                rc = template.allocate(template.to_xml)
+                if OpenNebula.is_error?(rc)
+                    raise Error, "failed to allocate OpenNebula hot-migration template #{@vm_name.inspect}: #{rc.message}"
+                end
+                if @helper.respond_to?(:chown_one_object, true) &&
+                   @helper.respond_to?(:resolve_one_ownership, true)
+                    @helper.send(
+                        :chown_one_object,
+                        template,
+                        *@helper.send(:resolve_one_ownership)
+                    )
+                end
+                state['template_id'] = template.id.to_i
+                state['phase'] = 'IMPORTED'
+                state['imported_at'] = Time.now.utc.iso8601
+                HotUtil.write_json_atomic(@state_path, state)
             end
+
             state
         end
 
         def cleanup
             state,=HotUtil.require_state!(@options); validate_state_identity!(state)
-            raise Error, "refusing hot-migration cleanup after cutover phase #{state['phase']}; preserve evidence and reconcile target/source state" if %w[CUTOVER_STARTED SOURCE_OFF DELTA_APPLIED IMPORTED].include?(state['phase'])
+            raise Error, "refusing hot-migration cleanup after cutover phase #{state['phase']}; preserve evidence and reconcile target/source state" if %w[CUTOVER_STARTED SOURCE_OFF DELTA_CAPTURING MORPHING DELTA_APPLIED IMPORTING IMPORTED].include?(state['phase'])
             @source.destroy_reference!(state); FileUtils.rm_rf(@dir); { 'status'=>'CLEANED','operation_id'=>@operation_id }
         end
 
