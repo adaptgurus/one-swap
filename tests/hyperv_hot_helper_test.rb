@@ -162,4 +162,25 @@ class HyperVHotHelperTest < Minitest::Test
     refute_includes source_text, 'Stop-VM -VM $vm -TurnOff'
   end
 
+  def test_delta_script_preserves_windows_physical_drive_device_namespace
+    source = OneSwapHyperV::HotSource.allocate
+    state = {
+      'remote_export_dir' => 'C:\\staging',
+      'operation_id' => 'op1'
+    }
+    disk = {
+      'source_path' => 'C:\\vm\\disk.vhdx',
+      'rct_id' => 'rct-1',
+      'virtual_size' => 1024
+    }
+    script = source.send(:create_remote_delta_bundle_script_for_test, state, disk, 0) if source.respond_to?(:create_remote_delta_bundle_script_for_test, true)
+    if script
+      assert_includes script, "\\\\.\\PhysicalDrive"
+      refute_includes script, "'\\.\\PhysicalDrive'"
+    else
+      text = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+      assert_includes text, "\\\\\\\\.\\\\PhysicalDrive"
+    end
+  end
+
 end
