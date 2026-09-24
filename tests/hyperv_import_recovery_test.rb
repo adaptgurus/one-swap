@@ -57,3 +57,11 @@ class HyperVImportRecoveryTest < Minitest::Test
     assert_match(/disk-0\z/, first_disk0)
   end
 end
+
+class HyperVReflinkSparseRegressionTest < Minitest::Test
+  def test_forced_reflink_uses_cp_compatible_sparse_mode
+    source = File.read(File.expand_path('../hyperv_import_recovery_hardening.rb', __dir__))
+    refute_includes source, "'--reflink=always', '--sparse=always'"
+    assert_operator source.scan("'--reflink=always', '--sparse=auto'").length, :>=, 2
+  end
+end
