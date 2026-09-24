@@ -99,4 +99,17 @@ class HyperVHotHelperTest < Minitest::Test
     assert_equal true, inventory['secure_boot']
   end
 
+  def test_reference_prepare_exports_before_rct_validation_and_cleans_failure
+    source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+    export_pos = source.index('$exp=$svc.ExportReferencePoint')
+    rct_pos = source.index('$rctIds=@($ref.ResilientChangeTrackingIdentifiers)')
+    refute_nil export_pos
+    refute_nil rct_pos
+    assert_operator export_pos, :<, rct_pos
+    assert_includes source, '$paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter'
+    refute_includes source, '$paths=@($job.ExportedDisks)'
+    assert_includes source, '$destroy=$svc.DestroyReferencePoint($ref)'
+    assert_includes source, 'Hyper-V returned an empty RCT identifier for disk index'
+  end
+
 end
