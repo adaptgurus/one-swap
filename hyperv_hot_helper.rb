@@ -267,8 +267,16 @@ module OneSwapHyperV
             op64 = Base64.strict_encode64(operation_id.encode(Encoding::UTF_8))
             result = @transport.powershell_json(reference_prepare_script(name64, staging64, op64, consistency), timeout: (@options[:hyperv_prepare_timeout] || 7200).to_i)
             raise Error, 'reference-point export returned no disks' if Array(result['ExportedDisks']).empty?
-            if Integer(result['ConsistencyLevel']) != 1
-                raise Error, "reference point is not application-consistent (level #{result['ConsistencyLevel']})"
+            consistency_level = Integer(result['ConsistencyLevel'])
+            guest_os = @options[:guest_os].to_s.downcase
+            allowed_levels = guest_os == 'linux' ? [1, 2] : [1]
+            unless allowed_levels.include?(consistency_level)
+                raise Error, "reference point consistency level #{consistency_level} is not qualified for guest OS #{guest_os.empty? ? 'unknown' : guest_os}"
+            end
+            if consistency_level == 2
+                result['BaselineConsistency'] = 'CRASH_CONSISTENT'
+            else
+                result['BaselineConsistency'] = 'APPLICATION_CONSISTENT'
             end
             if Array(result['RCT']).length != Array(metadata['Disks']).length
                 raise Error, 'RCT identifier count does not match Hyper-V source disk count'
