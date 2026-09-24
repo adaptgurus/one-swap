@@ -568,12 +568,18 @@ class OneSwapHelper
     end
 
     def hyperv_vm_template(metadata, image_ids)
-        memory_mb = Integer(metadata.fetch('MemoryStartupBytes')) / (1024 * 1024)
+        source_memory_mb = Integer(metadata.fetch('MemoryStartupBytes')) / (1024 * 1024)
+        memory_mb = @options[:memory_mb] ? Integer(@options[:memory_mb]) : source_memory_mb
         cpu = Integer(metadata.fetch('ProcessorCount'))
+        cpu_weight = @options[:cpu] || cpu
+        vcpu = @options[:vcpu] || cpu
+        raise OneSwapHyperV::Error, 'target memory must be greater than zero' unless memory_mb.positive?
+        raise OneSwapHyperV::Error, 'target CPU scheduling weight must be greater than zero' unless cpu_weight.to_f.positive?
+        raise OneSwapHyperV::Error, 'target VCPU count must be greater than zero' unless vcpu.to_i.positive?
         config = {
             'NAME' => @options[:name],
-            'CPU' => (@options[:cpu] || cpu).to_s,
-            'VCPU' => (@options[:vcpu] || cpu).to_s,
+            'CPU' => cpu_weight.to_s,
+            'VCPU' => vcpu.to_s,
             'MEMORY' => memory_mb.to_s,
             'HYPERVISOR' => 'kvm',
             'GRAPHICS' => {
