@@ -85,7 +85,8 @@ jobs:
           grep -q "ConvertToReferencePoint" hyperv_hot_helper.rb
           grep -q "DestroySnapshot" hyperv_hot_helper.rb
           grep -q "DestroyReferencePoint" hyperv_hot_helper.rb
-          grep -q "Stop-VM -VM \$vm -Shutdown" hyperv_hot_helper.rb
+          grep -q "Stop-VM -VM \$vm -ErrorAction Stop" hyperv_hot_helper.rb
+          ! grep -q "Stop-VM -VM \$vm -Shutdown" hyperv_hot_helper.rb
           ! grep -q "Stop-VM -VM \$vm -TurnOff" hyperv_hot_helper.rb
           grep -q "qemu-img baseline conversion failed" hyperv_hot_hardening.rb
           grep -q "type='raw'" hyperv_hot_hardening.rb
