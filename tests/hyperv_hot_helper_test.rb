@@ -127,6 +127,9 @@ class HyperVHotHelperTest < Minitest::Test
     script = source.send(:reference_prepare_script, '', '', '', 1)
     assert_includes script, "$ns='root\\virtualization\\v2'"
     refute_includes script, "\v"
+    assert_includes script, '$slash=[string][char]92'
+    assert_includes script, '$escapedValue=$value.Replace($slash,$slash+$slash)'
+    refute_includes script, ".Replace('','"
   end
 
 end
