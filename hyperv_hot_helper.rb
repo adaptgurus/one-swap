@@ -869,7 +869,7 @@ module OneSwapHyperV
             raise Error,'OpenNebula target datastore/network ids must be non-negative integers'
         end
 
-        def target_digest; HotUtil.digest({'datastore'=>@options[:datastore].to_s,'network'=>@options[:network].to_s,'cluster'=>@options[:one_cluster],'host'=>@options[:one_host],'sys_ds'=>@options[:one_datastore],'ds_cluster'=>@options[:one_datastore_cluster],'cpu'=>@options[:cpu],'vcpu'=>@options[:vcpu],'memory_mb'=>@options[:memory_mb],'uefi'=>@options[:uefi_path],'uefi_secure'=>@options[:uefi_sec_path]}); end
+        def target_digest; HotUtil.digest({'datastore'=>@options[:datastore].to_s,'network'=>@options[:network].to_s,'cluster'=>@options[:one_cluster],'host'=>@options[:one_host],'sys_ds'=>@options[:one_datastore],'ds_cluster'=>@options[:one_datastore_cluster],'cpu'=>@options[:cpu],'vcpu'=>@options[:vcpu],'memory_mb'=>@options[:memory_mb],'qemu_ga_linux'=>@options[:qemu_ga_linux],'qemu_ga_win'=>@options[:qemu_ga_win].to_s,'uefi'=>@options[:uefi_path],'uefi_secure'=>@options[:uefi_sec_path]}); end
 
         def verify_prepared_drift!(state,metadata)
             raise Error,'source VM identity changed since hot prepare' unless metadata['VMId'].to_s.casecmp(state['source_vm_id'].to_s).zero?; raise Error,'target migration parameters changed since hot prepare' unless target_digest==state['target_digest']; raise Error,'Hyper-V source topology/capability changed since hot prepare; cutover is blocked' unless HotUtil.digest(stable_metadata(metadata))==state['metadata_digest']
