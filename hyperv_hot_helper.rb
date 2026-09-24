@@ -414,35 +414,69 @@ module OneSwapHyperV
                 $refs=@(Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | Where-Object {$before -notcontains $_.InstanceID})
                 if ($refs.Count -ne 1) { throw "expected exactly one new RCT reference point; found $($refs.Count)" }
                 $ref=$refs[0]
-                if ($ref.VirtualDiskIdentifiers.Count -ne $ref.ResilientChangeTrackingIdentifiers.Count) { throw 'RCT reference point disk/id arrays differ in size' }
-                $rct=@()
-                for ($i=0;$i -lt $ref.VirtualDiskIdentifiers.Count;$i++) {
-                    $path=Resolve-DiskPath ([string]$ref.VirtualDiskIdentifiers[$i]) $sourceDisks
-                    if ([string]::IsNullOrWhiteSpace($path)) { throw "unable to map RCT disk identifier $($ref.VirtualDiskIdentifiers[$i]) to a source VHDX" }
-                    $rct += [pscustomobject]@{Path=$path;VirtualDiskIdentifier=[string]$ref.VirtualDiskIdentifiers[$i];RCTId=[string]$ref.ResilientChangeTrackingIdentifiers[$i]}
-                }
                 $exportDir=Join-Path $staging ('layersentry-hot-'+($op -replace '[^A-Za-z0-9_.-]','_'))
-                if (Test-Path -LiteralPath $exportDir) {
-                    if ((Get-ChildItem -LiteralPath $exportDir -Force | Measure-Object).Count -gt 0) { throw "staging directory already contains data: $exportDir" }
-                } else { New-Item -ItemType Directory -Path $exportDir -Force | Out-Null }
-                $exportSettingClass=Get-WmiObject -Namespace $ns -List | Where-Object {$_.Name -eq 'Msvm_VirtualSystemReferencePointExportSettingData'}
-                if ($null -eq $exportSettingClass) { throw 'reference point export settings class unavailable' }
-                $exportSetting=$exportSettingClass.CreateInstance()
-                $exp=$svc.ExportReferencePoint($ref,$exportDir,$exportSetting.GetText(1))
-                $job=$null
-                if ($exp.ReturnValue -eq 4096) { $job=Wait-WmiJob $exp.Job }
-                elseif ($exp.ReturnValue -ne 0) { throw "ExportReferencePoint failed code=$($exp.ReturnValue)" }
-                $paths=@()
-                if ($null -ne $job -and $job.PSObject.Properties.Name -contains 'ExportedDisks') { $paths=@($job.ExportedDisks) }
-                if ($paths.Count -eq 0) { $paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter '*.vhdx' | ForEach-Object {$_.FullName}) }
-                $exports=@($paths | ForEach-Object {
-                    $vhd=Get-VHD -Path $_ -ErrorAction Stop
-                    $item=Get-Item -LiteralPath $_ -ErrorAction Stop
-                    $hash=Get-FileHash -LiteralPath $_ -Algorithm SHA256 -ErrorAction Stop
-                    [pscustomobject]@{Path=$_;VirtualDiskId=[string]$vhd.DiskIdentifier;VirtualSize=[int64]$vhd.Size;FileSize=[int64]$item.Length;SHA256=$hash.Hash.ToLowerInvariant()}
-                })
-                if ($exports.Count -ne $sourceDisks.Count) { throw "reference export produced $($exports.Count) disks; expected $($sourceDisks.Count)" }
-                [pscustomobject]@{ReferencePointId=$ref.InstanceID;ConsistencyLevel=[int]$ref.ConsistencyLevel;RemoteExportDir=$exportDir;RCT=$rct;ExportedDisks=$exports} | ConvertTo-Json -Depth 8 -Compress
+                $prepareComplete=$false
+                try {
+                    if (Test-Path -LiteralPath $exportDir) {
+                        if ((Get-ChildItem -LiteralPath $exportDir -Force | Measure-Object).Count -gt 0) { throw "staging directory already contains data: $exportDir" }
+                    } else { New-Item -ItemType Directory -Path $exportDir -Force | Out-Null }
+                    $exportSettingClass=Get-WmiObject -Namespace $ns -List | Where-Object {$_.Name -eq 'Msvm_VirtualSystemReferencePointExportSettingData'}
+                    if ($null -eq $exportSettingClass) { throw 'reference point export settings class unavailable' }
+                    $exportSetting=$exportSettingClass.CreateInstance()
+                    $exp=$svc.ExportReferencePoint($ref,$exportDir,$exportSetting.GetText(1))
+                    if ($exp.ReturnValue -eq 4096) { Wait-WmiJob $exp.Job | Out-Null }
+                    elseif ($exp.ReturnValue -ne 0) { throw "ExportReferencePoint failed code=$($exp.ReturnValue)" }
+
+                    # The Hyper-V provider may not materialize usable RCT identifiers until
+                    # the reference point export has completed. Refresh the WMI object after
+                    # export and validate one non-empty RCT id per source disk.
+                    $refId=[string]$ref.InstanceID
+                    $escapedRefId=$refId.Replace("'", "''")
+                    $ref=Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePoint -Filter "InstanceID='$escapedRefId'" -ErrorAction Stop
+                    $virtualDiskIds=@($ref.VirtualDiskIdentifiers)
+                    $rctIds=@($ref.ResilientChangeTrackingIdentifiers)
+                    if ($virtualDiskIds.Count -ne $sourceDisks.Count) {
+                        throw "RCT reference point has $($virtualDiskIds.Count) disk identifiers after export; expected $($sourceDisks.Count)"
+                    }
+                    if ($rctIds.Count -ne $virtualDiskIds.Count) {
+                        throw "RCT reference point disk/id arrays differ after export: disks=$($virtualDiskIds.Count) rct=$($rctIds.Count) type=$($ref.ReferencePointType) associated=$($ref.HasAssociatedData)"
+                    }
+                    $rct=@()
+                    for ($i=0;$i -lt $virtualDiskIds.Count;$i++) {
+                        $rctId=[string]$rctIds[$i]
+                        if ([string]::IsNullOrWhiteSpace($rctId)) {
+                            throw "Hyper-V returned an empty RCT identifier for disk index $i after export"
+                        }
+                        $path=Resolve-DiskPath ([string]$virtualDiskIds[$i]) $sourceDisks
+                        if ([string]::IsNullOrWhiteSpace($path)) { throw "unable to map RCT disk identifier $($virtualDiskIds[$i]) to a source VHDX" }
+                        $rct += [pscustomobject]@{Path=$path;VirtualDiskIdentifier=[string]$virtualDiskIds[$i];RCTId=$rctId}
+                    }
+
+                    # ExportedDisks on the WMI export job contains virtual-disk instance IDs,
+                    # not filesystem paths. Discover exported VHDX files from the export tree.
+                    $paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter '*.vhdx' | ForEach-Object {$_.FullName})
+                    $exports=@($paths | ForEach-Object {
+                        $vhd=Get-VHD -Path $_ -ErrorAction Stop
+                        $item=Get-Item -LiteralPath $_ -ErrorAction Stop
+                        $hash=Get-FileHash -LiteralPath $_ -Algorithm SHA256 -ErrorAction Stop
+                        [pscustomobject]@{Path=$_;VirtualDiskId=[string]$vhd.DiskIdentifier;VirtualSize=[int64]$vhd.Size;FileSize=[int64]$item.Length;SHA256=$hash.Hash.ToLowerInvariant()}
+                    })
+                    if ($exports.Count -ne $sourceDisks.Count) { throw "reference export produced $($exports.Count) disks; expected $($sourceDisks.Count)" }
+                    $prepareComplete=$true
+                    [pscustomobject]@{ReferencePointId=$ref.InstanceID;ConsistencyLevel=[int]$ref.ConsistencyLevel;RemoteExportDir=$exportDir;RCT=$rct;ExportedDisks=$exports} | ConvertTo-Json -Depth 8 -Compress
+                } finally {
+                    if (-not $prepareComplete) {
+                        try {
+                            if ($null -ne $ref) {
+                                $destroy=$svc.DestroyReferencePoint($ref)
+                                if ($destroy.ReturnValue -eq 4096) { Wait-WmiJob $destroy.Job | Out-Null }
+                            }
+                        } catch {}
+                        if ($exportDir -and (Test-Path -LiteralPath $exportDir)) {
+                            Remove-Item -LiteralPath $exportDir -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
             POWERSHELL
         end
 
