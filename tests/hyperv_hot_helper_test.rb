@@ -162,11 +162,17 @@ class HyperVHotHelperTest < Minitest::Test
     refute_includes source_text, 'Stop-VM -VM $vm -TurnOff'
   end
 
-  def test_delta_script_builds_windows_physical_drive_path_without_ruby_escape_loss
+  def test_delta_script_opens_windows_physical_drive_with_createfile
     source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
     assert_includes source, "$slash=[string][char]92"
     assert_includes source, "$rawPath=$slash+$slash+'.'+$slash+'PhysicalDrive'+$diskObj.Number"
-    refute_includes source, "$rawPath='\\\\.\\\\PhysicalDrive'"
+    assert_includes source, 'CreateFileW'
+    assert_includes source, 'Microsoft.Win32.SafeHandles'
+    assert_includes source, '[uint32]2147483648'
+    assert_includes source, '[uint32]3'
+    assert_includes source, '[IO.FileStream]::new($handle,[IO.FileAccess]::Read)'
+    assert_includes source, 'GetLastWin32Error'
+    refute_includes source, '[IO.File]::Open($rawPath'
   end
 
   def test_restart_safe_cutover_phases_and_physicaldrive_path
