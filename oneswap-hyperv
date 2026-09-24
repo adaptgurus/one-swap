@@ -98,8 +98,9 @@ parser = OptionParser.new do |opts|
     opts.on('--virt-tools PATH', String) { |v| options[:virt_tools] = v }
     opts.on('--dev-prefix PREFIX', String) { |v| options[:dev_prefix] = v }
     opts.on('--cpu-model MODEL', String) { |v| options[:cpu_model] = v }
-    opts.on('--cpu CPU', Integer) { |v| options[:cpu] = v }
+    opts.on('--cpu CPU', Float, 'OpenNebula CPU scheduling weight; VCPU controls guest processor count') { |v| options[:cpu] = v }
     opts.on('--vcpu VCPU', Integer) { |v| options[:vcpu] = v }
+    opts.on('--memory-mb MB', Integer, 'Explicit target VM memory in MB; default preserves source startup memory') { |v| options[:memory_mb] = v }
     opts.on('--graphics-type TYPE', String) { |v| options[:graphics_type] = v }
     opts.on('--graphics-listen IP', String) { |v| options[:graphics_listen] = v }
     opts.on('--disable-contextualization') { options[:disable_contextualization] = true }
@@ -126,6 +127,9 @@ begin
     vm_name = ARGV.shift
     raise OptionParser::MissingArgument, 'VM_NAME' if vm_name.to_s.strip.empty?
     raise OptionParser::InvalidArgument, "unexpected extra arguments: #{ARGV.join(' ')}" unless ARGV.empty?
+    raise OptionParser::InvalidArgument, '--cpu must be greater than zero' if options[:cpu] && options[:cpu].to_f <= 0
+    raise OptionParser::InvalidArgument, '--vcpu must be greater than zero' if options[:vcpu] && options[:vcpu].to_i <= 0
+    raise OptionParser::InvalidArgument, '--memory-mb must be greater than zero' if options[:memory_mb] && options[:memory_mb].to_i <= 0
 
     config_file = options[:config_file]
     if config_file && File.exist?(config_file)
