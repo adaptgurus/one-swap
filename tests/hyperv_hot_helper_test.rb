@@ -155,4 +155,11 @@ class HyperVHotHelperTest < Minitest::Test
     refute_includes script, '$instanceId -match'
   end
 
+  def test_hot_cutover_uses_graceful_stop_vm_without_unsafe_switches
+    source_text = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+    assert_includes source_text, 'Stop-VM -VM $vm -ErrorAction Stop'
+    refute_includes source_text, 'Stop-VM -VM $vm -Shutdown'
+    refute_includes source_text, 'Stop-VM -VM $vm -TurnOff'
+  end
+
 end
