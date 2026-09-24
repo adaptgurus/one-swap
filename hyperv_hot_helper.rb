@@ -667,7 +667,40 @@ module OneSwapHyperV
                     $diskObj=$mount | Get-Disk -ErrorAction Stop
                     $slash=[string][char]92
                     $rawPath=$slash+$slash+'.'+$slash+'PhysicalDrive'+$diskObj.Number
-                    $source=[IO.File]::Open($rawPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+                    if (-not ('LayerSentry.RawDiskNative' -as [type])) {
+                        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace LayerSentry {
+    public static class RawDiskNative {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern SafeFileHandle CreateFileW(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+    }
+}
+"@
+                    }
+                    $handle=[LayerSentry.RawDiskNative]::CreateFileW(
+                        $rawPath,
+                        [uint32]2147483648,
+                        [uint32]3,
+                        [IntPtr]::Zero,
+                        [uint32]3,
+                        [uint32]0,
+                        [IntPtr]::Zero)
+                    if ($handle.IsInvalid) {
+                        $win32=[Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                        $handle.Dispose()
+                        throw "CreateFileW failed for physical disk $rawPath win32=$win32"
+                    }
+                    $source=[IO.FileStream]::new($handle,[IO.FileAccess]::Read)
                     try {
                         $bundle=Join-Path $dir ('delta-#{index.to_i}-'+($op -replace '[^A-Za-z0-9_.-]','_')+'.lshv')
                         $out=[IO.File]::Open($bundle,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
