@@ -134,4 +134,39 @@ class HyperVHotHelperTest < Minitest::Test
     refute_includes script, '$instanceId -match'
   end
 
+  def test_linux_hot_prepare_allows_crash_consistent_baseline
+    source = OneSwapHyperV::HotSource.allocate
+    source.instance_variable_set(:@options, { guest_os: 'linux' })
+    transport = Object.new
+    def transport.powershell_json(_script, timeout:)
+      {
+        'ConsistencyLevel' => 2,
+        'ExportedDisks' => [{'Path'=>'/tmp/a','VirtualDiskId'=>'x','FileSize'=>1,'SHA256'=>'00'}],
+        'RCT' => [{'Path'=>'C:\\VMs\\disk.vhdx','RCTId'=>'rct-1'}]
+      }
+    end
+    source.instance_variable_set(:@transport, transport)
+    metadata = eligible
+    result = source.create_and_export_reference('hv01','op-linux',metadata)
+    assert_equal 'CRASH_CONSISTENT', result['BaselineConsistency']
+  end
+
+  def test_windows_hot_prepare_rejects_crash_consistent_baseline
+    source = OneSwapHyperV::HotSource.allocate
+    source.instance_variable_set(:@options, { guest_os: 'windows' })
+    transport = Object.new
+    def transport.powershell_json(_script, timeout:)
+      {
+        'ConsistencyLevel' => 2,
+        'ExportedDisks' => [{'Path'=>'/tmp/a','VirtualDiskId'=>'x','FileSize'=>1,'SHA256'=>'00'}],
+        'RCT' => [{'Path'=>'C:\\VMs\\disk.vhdx','RCTId'=>'rct-1'}]
+      }
+    end
+    source.instance_variable_set(:@transport, transport)
+    assert_raises(OneSwapHyperV::Error) do
+      source.create_and_export_reference('hv01','op-windows',eligible)
+    end
+  end
+
+
 end
