@@ -37,7 +37,7 @@ module OneSwapHyperV
                 file.flush
                 file.fsync
             end
-            stdout, stderr, status = Open3.capture3('cp', '--reflink=always', '--sparse=always', '--', source, clone)
+            stdout, stderr, status = Open3.capture3('cp', '--reflink=always', '--sparse=auto', '--', source, clone)
             unless status.success? && File.file?(clone)
                 raise Error, "restart-safe Hyper-V import requires a reflink-capable conversion workspace; cp --reflink=always failed: #{stderr.empty? ? stdout : stderr}"
             end
@@ -181,7 +181,7 @@ module OneSwapHyperV
         end
 
         def reflink_clone!(source, destination, index)
-            stdout, stderr, status = Open3.capture3('cp', '--reflink=always', '--sparse=always', '--', source, destination)
+            stdout, stderr, status = Open3.capture3('cp', '--reflink=always', '--sparse=auto', '--', source, destination)
             unless status.success? && File.file?(destination)
                 FileUtils.rm_f(destination)
                 raise Error, "restart-safe COW clone failed for disk #{index}: #{stderr.empty? ? stdout : stderr}"
