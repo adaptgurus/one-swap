@@ -665,7 +665,8 @@ module OneSwapHyperV
                 $mount=Mount-VHD -Path $path -ReadOnly -NoDriveLetter -Passthru -ErrorAction Stop
                 try {
                     $diskObj=$mount | Get-Disk -ErrorAction Stop
-                    $rawPath='\\.\\PhysicalDrive'+$diskObj.Number
+                    $slash=[string][char]92
+                    $rawPath=$slash+$slash+'.'+$slash+'PhysicalDrive'+$diskObj.Number
                     $source=[IO.File]::Open($rawPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
                     try {
                         $bundle=Join-Path $dir ('delta-#{index.to_i}-'+($op -replace '[^A-Za-z0-9_.-]','_')+'.lshv')
