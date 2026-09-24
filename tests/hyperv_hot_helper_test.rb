@@ -122,4 +122,11 @@ class HyperVHotHelperTest < Minitest::Test
     refute_includes source, '$svc.ExportReferencePoint'
   end
 
+  def test_reference_prepare_generated_script_preserves_cim_namespace
+    source = OneSwapHyperV::HotSource.allocate
+    script = source.send(:reference_prepare_script, '', '', '', 1)
+    assert_includes script, "$ns='root\\virtualization\\v2'"
+    refute_includes script, "\v"
+  end
+
 end
