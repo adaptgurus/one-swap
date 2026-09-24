@@ -37,6 +37,16 @@ class HyperVHelperTest < Minitest::Test
     assert_includes xml, "type='vhdx'"
     assert_includes xml, 'vm&lt;&amp;'
   end
+  def test_target_sizing_cli_and_template_contract
+    cli=File.read(File.expand_path('../oneswap-hyperv', __dir__))
+    helper=File.read(File.expand_path('../hyperv_helper.rb', __dir__))
+    assert_includes cli, "opts.on('--cpu CPU', Float"
+    assert_includes cli, "opts.on('--memory-mb MB', Integer"
+    assert_includes helper, '@options[:memory_mb]'
+    assert_includes helper, "'CPU' => cpu_weight.to_s"
+    assert_includes helper, "'VCPU' => vcpu.to_s"
+  end
+
 end
 
 
