@@ -99,4 +99,74 @@ class HyperVHotHelperTest < Minitest::Test
     assert_equal true, inventory['secure_boot']
   end
 
+  def test_reference_prepare_uses_backup_checkpoint_export_then_rct_conversion
+    source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+    create_pos = source.index("SnapshotType=[uint16]32768")
+    export_pos = source.index("Invoke-CimMethod -MethodName ExportSystemDefinition")
+    convert_pos = source.index("Invoke-CimMethod -MethodName ConvertToReferencePoint")
+    rct_pos = source.index('$rctIds=@($ref.ResilientChangeTrackingIdentifiers)')
+    refute_nil create_pos
+    refute_nil export_pos
+    refute_nil convert_pos
+    refute_nil rct_pos
+    assert_operator create_pos, :<, export_pos
+    assert_operator export_pos, :<, convert_pos
+    assert_operator convert_pos, :<, rct_pos
+    assert_includes source, 'CopySnapshotConfiguration=[uint16]3'
+    assert_includes source, 'CopyVmStorage=$true'
+    assert_includes source, "VirtualSystemType -eq 'Microsoft:Hyper-V:Snapshot:Recovery'"
+    assert_includes source, '$paths=@(Get-ChildItem -LiteralPath $exportDir -Recurse -File -Filter'
+    assert_includes source, "Invoke-CimMethod -MethodName DestroySnapshot"
+    assert_includes source, "Invoke-CimMethod -MethodName DestroyReferencePoint"
+    assert_includes source, 'converted RCT identifier is empty for disk index'
+    refute_includes source, '$svc.ExportReferencePoint'
+  end
+
+  def test_reference_prepare_generated_script_preserves_cim_namespace
+    source = OneSwapHyperV::HotSource.allocate
+    script = source.send(:reference_prepare_script, '', '', '', 1)
+    assert_includes script, "$ns='root\\virtualization\\v2'"
+    refute_includes script, "\v"
+    assert_includes script, '$slash=[string][char]92'
+    assert_includes script, '$escapedValue=$value.Replace($slash,$slash+$slash)'
+    refute_includes script, ".Replace('','"
+    assert_includes script, '$parts=@($instanceId.Split([char]92)'
+    refute_includes script, '$instanceId -match'
+  end
+
+  def test_linux_hot_prepare_allows_crash_consistent_baseline
+    source = OneSwapHyperV::HotSource.allocate
+    source.instance_variable_set(:@options, { guest_os: 'linux' })
+    transport = Object.new
+    def transport.powershell_json(_script, timeout:)
+      {
+        'ConsistencyLevel' => 2,
+        'ExportedDisks' => [{'Path'=>'/tmp/a','VirtualDiskId'=>'x','FileSize'=>1,'SHA256'=>'00'}],
+        'RCT' => [{'Path'=>'C:\\VMs\\disk.vhdx','RCTId'=>'rct-1'}]
+      }
+    end
+    source.instance_variable_set(:@transport, transport)
+    metadata = eligible
+    result = source.create_and_export_reference('hv01','op-linux',metadata)
+    assert_equal 'CRASH_CONSISTENT', result['BaselineConsistency']
+  end
+
+  def test_windows_hot_prepare_rejects_crash_consistent_baseline
+    source = OneSwapHyperV::HotSource.allocate
+    source.instance_variable_set(:@options, { guest_os: 'windows' })
+    transport = Object.new
+    def transport.powershell_json(_script, timeout:)
+      {
+        'ConsistencyLevel' => 2,
+        'ExportedDisks' => [{'Path'=>'/tmp/a','VirtualDiskId'=>'x','FileSize'=>1,'SHA256'=>'00'}],
+        'RCT' => [{'Path'=>'C:\\VMs\\disk.vhdx','RCTId'=>'rct-1'}]
+      }
+    end
+    source.instance_variable_set(:@transport, transport)
+    assert_raises(OneSwapHyperV::Error) do
+      source.create_and_export_reference('hv01','op-windows',eligible)
+    end
+  end
+
+
 end
