@@ -219,7 +219,12 @@ module OneSwapHyperV
             if encoded.bytesize <= POWERSHELL_ENCODED_COMMAND_MAX_BYTES
                 [common + ['-EncodedCommand', encoded], nil]
             else
-                [common + ['-Command', '-'], script.encode(Encoding::UTF_8)]
+                bootstrap = <<~POWERSHELL
+                    $ErrorActionPreference = 'Stop'
+                    $payload = [Console]::In.ReadToEnd()
+                    & ([ScriptBlock]::Create($payload))
+                POWERSHELL
+                [common + ['-EncodedCommand', Util.powershell_encoded(bootstrap)], script.encode(Encoding::UTF_8)]
             end
         end
     end
