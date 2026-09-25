@@ -1008,6 +1008,8 @@ namespace LayerSentry {
             env = {}
             libguestfs = @options[:libguestfs_path].to_s.strip
             env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
+            libguestfs_memsize = @options[:libguestfs_memsize].to_i
+            env['LIBGUESTFS_MEMSIZE'] = libguestfs_memsize.to_s if libguestfs_memsize.positive?
             binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
             v2v_timeout = positive_timeout(:hyperv_transfer_timeout) || 7200
             stdout = +''
