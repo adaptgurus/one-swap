@@ -118,6 +118,28 @@ module OneSwapHyperV
             hex.scan(/../).join(':')
         end
 
+        def final_raw_libvirt_xml(state, raw_paths)
+            disks = Array(state['disks'])
+            raise Error, "prepared RAW disk count #{raw_paths.length} does not match durable disk count #{disks.length}" unless raw_paths.length == disks.length
+            raw_paths.each_with_index do |path, index|
+                raise Error, "prepared RAW disk #{index} is missing: #{path}" unless File.file?(path)
+                expected = Integer(disks.fetch(index).fetch('virtual_size'))
+                observed = File.size(path)
+                raise Error, "prepared RAW disk #{index} size #{observed} does not match durable virtual size #{expected}" unless observed == expected
+            end
+
+            xml = Converter.new(@options.merge(:format => 'raw')).libvirt_xml(
+                @vm_name,
+                state.fetch('metadata'),
+                raw_paths
+            )
+            raw_driver_count = xml.scan(/<driver name='qemu' type='raw'\/>/).length
+            raise Error, "final RAW libvirt XML contains #{raw_driver_count} raw disk drivers; expected #{raw_paths.length}" unless raw_driver_count == raw_paths.length
+            xml
+        rescue KeyError, ArgumentError, TypeError => e
+            raise Error, "unable to build final RAW libvirt XML: #{e.message}"
+        end
+
         def validate_secure_boot_target!(metadata)
             return true unless Util.bool(metadata['SecureBoot'])
 
