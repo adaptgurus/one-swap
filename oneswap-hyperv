@@ -47,6 +47,7 @@ parser = OptionParser.new do |opts|
     opts.on('--commit', 'Revalidate, gracefully stop source VM, apply final RCT delta and import target') { options[:commit] = true }
     opts.on('--recover-morphing-prelaunch', 'Recover a proven prelaunch MORPHING failure without replaying the final RCT delta') { options[:recover_morphing_prelaunch] = true }
     opts.on('--recover-morphing-no-write', 'Retry a failed prelaunch MORPHING recovery only when retained evidence proves the prepared RAW disks were not written') { options[:recover_morphing_no_write] = true }
+    opts.on('--recover-morphing-post-oom-clone', 'Recover a failed no-write MORPHING attempt by converting reflink clones and adopting them only after success') { options[:recover_morphing_post_oom_clone] = true }
     opts.on('--verify-source-off', 'Verify the same Hyper-V source remains Off immediately before OpenNebula materialization') { options[:verify_source_off] = true }
     opts.on('--cleanup', 'Remove prepared RCT/staging state before cutover') { options[:cleanup] = true }
     opts.on('--finalize-success', 'Cleanup RCT/staging after LayerSentry independently validates target success') { options[:finalize_success] = true }
@@ -170,7 +171,7 @@ begin
 
     helper = OneSwapHelper.new
     if options[:inventory]
-        conflicting = %i[hot preflight prepare commit recover_morphing_prelaunch recover_morphing_no_write verify_source_off cleanup finalize_success].select { |name| options[name] }
+        conflicting = %i[hot preflight prepare commit recover_morphing_prelaunch recover_morphing_no_write recover_morphing_post_oom_clone verify_source_off cleanup finalize_success].select { |name| options[name] }
         raise "--inventory cannot be combined with #{conflicting.map { |name| "--#{name.to_s.tr('_', '-')}" }.join(', ')}" unless conflicting.empty?
         result = helper.hyperv_inventory(vm_name, options)
         puts JSON.generate(result.merge('source_platform' => 'hyperv', 'source_vm_name' => vm_name))
@@ -180,8 +181,8 @@ begin
     helper.instance_variable_set(:@client, OpenNebula::Client.new)
 
     if options[:hot]
-        phases = %i[preflight prepare commit recover_morphing_prelaunch recover_morphing_no_write verify_source_off cleanup finalize_success].select { |name| options[name] }
-        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --recover-morphing-prelaunch, --recover-morphing-no-write, --verify-source-off, --cleanup or --finalize-success' unless phases.length == 1
+        phases = %i[preflight prepare commit recover_morphing_prelaunch recover_morphing_no_write recover_morphing_post_oom_clone verify_source_off cleanup finalize_success].select { |name| options[name] }
+        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --recover-morphing-prelaunch, --recover-morphing-no-write, --recover-morphing-post-oom-clone, --verify-source-off, --cleanup or --finalize-success' unless phases.length == 1
         raise 'hot migration requires --operation-id' if options[:operation_id].to_s.strip.empty?
         result = case phases.first
                  when :preflight then helper.hyperv_hot_preflight(vm_name, options)
@@ -189,14 +190,15 @@ begin
                  when :commit then helper.hyperv_hot_commit(vm_name, options)
                  when :recover_morphing_prelaunch then helper.hyperv_hot_recover_morphing_prelaunch(vm_name, options)
                  when :recover_morphing_no_write then helper.hyperv_hot_recover_morphing_no_write(vm_name, options)
+                 when :recover_morphing_post_oom_clone then helper.hyperv_hot_recover_morphing_post_oom_clone(vm_name, options)
                  when :verify_source_off then helper.hyperv_hot_verify_source_off(vm_name, options)
                  when :cleanup then helper.hyperv_hot_cleanup(vm_name, options)
                  when :finalize_success then helper.hyperv_hot_finalize_success(vm_name, options)
                  end
         puts JSON.generate(result.merge('source_platform' => 'hyperv', 'vm_name' => vm_name))
     else
-        if %i[preflight prepare commit recover_morphing_prelaunch recover_morphing_no_write verify_source_off cleanup finalize_success].any? { |name| options[name] }
-            raise '--preflight/--prepare/--commit/--recover-morphing-prelaunch/--recover-morphing-no-write/--verify-source-off/--cleanup/--finalize-success require --hot'
+        if %i[preflight prepare commit recover_morphing_prelaunch recover_morphing_no_write recover_morphing_post_oom_clone verify_source_off cleanup finalize_success].any? { |name| options[name] }
+            raise '--preflight/--prepare/--commit/--recover-morphing-prelaunch/--recover-morphing-no-write/--recover-morphing-post-oom-clone/--verify-source-off/--cleanup/--finalize-success require --hot'
         end
         template_id = helper.hyperv_convert(vm_name, options)
         puts JSON.generate({ :status => 'imported', :source_platform => 'hyperv', :vm_name => vm_name, :template_id => template_id })
