@@ -3,6 +3,10 @@
 # -------------------------------------------------------------------------- #
 
 require 'digest'
+require 'fileutils'
+require 'json'
+require 'open3'
+require 'time'
 require 'opennebula/image_pool'
 require 'opennebula/template_pool'
 require_relative 'hyperv_materialization_guard'
