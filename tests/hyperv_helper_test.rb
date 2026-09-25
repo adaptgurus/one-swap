@@ -66,12 +66,12 @@ class HyperVSSHTransportCommandLengthTest < Minitest::Test
     assert_nil stdin_data
   end
 
-  def test_large_powershell_uses_stdin_command_transport
+  def test_large_powershell_uses_native_stdin_command_transport
     script = "$x='a'\n" + ("Write-Output $x\n" * 2_000)
     argv, stdin_data = transport.send(:powershell_invocation, script)
-    assert_includes argv, '-EncodedCommand'
-    refute_includes argv, '-Command'
-    refute_equal OneSwapHyperV::Util.powershell_encoded(script), argv.last
+    assert_includes argv, '-Command'
+    assert_equal '-', argv.last
+    refute_includes argv, '-EncodedCommand'
     assert_equal script, stdin_data
     assert_operator OneSwapHyperV::Util.powershell_encoded(script).bytesize,
                     :>,
