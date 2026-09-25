@@ -74,7 +74,92 @@ module OneSwapHyperV
             state
         end
 
+        def recover_morphing_prelaunch
+            validate_local_prerequisites!
+            state = HotUtil.load_state(@state_path)
+            raise Error, 'Hyper-V hot migration state is missing' unless state
+            validate_state_identity!(state)
+            raise Error, "MORPHING prelaunch recovery requires phase MORPHING; found #{state['phase'].inspect}" unless state['phase'].to_s == 'MORPHING'
+            raise Error, 'MORPHING prelaunch recovery was already attempted; automatic replay is prohibited' if state['morph_prelaunch_recovery_started_at']
+
+            verify_source_off_for_import!(state)
+            verify_morphing_delta_application!(state)
+
+            xml = File.join(@dir, 'final-libvirt.xml')
+            raise Error, 'MORPHING prelaunch recovery requires the retained zero-length final-libvirt.xml evidence from the failed XML-builder call' unless File.file?(xml) && File.size(xml).zero?
+
+            state['morph_prelaunch_recovery_started_at'] = Time.now.utc.iso8601
+            state['morph_prelaunch_recovery_reason'] = 'validated_zero_length_xml_before_virt_v2v_launch'
+            HotUtil.write_json_atomic(@state_path, state)
+
+            rerun_v2v_in_place!(state)
+
+            state['phase'] = 'DELTA_APPLIED'
+            state['delta_applied_at'] ||= Time.now.utc.iso8601
+            state['morph_prelaunch_recovery_completed_at'] = Time.now.utc.iso8601
+            HotUtil.write_json_atomic(@state_path, state)
+            state
+        end
+
         private
+
+        def verify_morphing_delta_application!(state)
+            disks = Array(state['disks'])
+            bundles = Array(state['delta_bundles'])
+            raise Error, 'MORPHING recovery requires durable delta bundle evidence for every disk' unless !disks.empty? && bundles.length == disks.length
+            applied = Array(state['delta_applied_indices']).map { |value| Integer(value) }.uniq.sort
+            expected_indices = (0...disks.length).to_a
+            raise Error, "MORPHING recovery requires every delta index applied; found #{applied.inspect}" unless applied == expected_indices
+
+            disks.each_with_index do |disk, index|
+                evidence = bundles.find { |entry| Integer(entry['index']) == index }
+                raise Error, "MORPHING recovery is missing delta evidence for disk #{index}" unless evidence
+                bundle_path = evidence['path'].to_s
+                raw_path = disk['prepared_raw_path'].to_s
+                verify_local_artifact!(
+                    bundle_path,
+                    Integer(evidence['size']),
+                    evidence['sha256'].to_s,
+                    "final delta bundle #{index}"
+                )
+                raise Error, "prepared RAW disk #{index} is missing" unless File.file?(raw_path)
+                expected_virtual_size = Integer(disk['virtual_size'])
+                raise Error, "prepared RAW disk #{index} size changed" unless File.size(raw_path) == expected_virtual_size
+
+                File.open(bundle_path, 'rb') do |bundle|
+                    raise Error, "final delta bundle #{index} magic is invalid" unless bundle.read(8) == DELTA_MAGIC
+                    virtual_size = bundle.read(8)&.unpack1('q<')
+                    count = bundle.read(4)&.unpack1('l<')
+                    raise Error, "final delta bundle #{index} header is truncated" unless virtual_size && count
+                    raise Error, "final delta bundle #{index} virtual size changed" unless virtual_size == expected_virtual_size
+                    raise Error, "final delta bundle #{index} range count is invalid" if count.negative? || count > 10_000_000
+
+                    File.open(raw_path, 'rb') do |raw|
+                        count.times do |range_index|
+                            offset = bundle.read(8)&.unpack1('q<')
+                            length = bundle.read(8)&.unpack1('q<')
+                            raise Error, "final delta bundle #{index} range #{range_index} header is truncated" unless offset && length
+                            raise Error, "final delta bundle #{index} range #{range_index} is out of bounds" if offset.negative? || length.negative? || offset + length > virtual_size
+                            raw.seek(offset, IO::SEEK_SET)
+                            remaining = length
+                            while remaining.positive?
+                                wanted = [remaining, 1024 * 1024].min
+                                delta_bytes = bundle.read(wanted)
+                                raw_bytes = raw.read(wanted)
+                                unless delta_bytes && raw_bytes && delta_bytes.bytesize == wanted && raw_bytes.bytesize == wanted && delta_bytes == raw_bytes
+                                    raise Error, "prepared RAW disk #{index} does not exactly contain durable delta range #{range_index}"
+                                end
+                                remaining -= wanted
+                            end
+                        end
+                    end
+                    raise Error, "final delta bundle #{index} contains trailing bytes" unless bundle.read(1).nil?
+                end
+            end
+            true
+        rescue ArgumentError, TypeError => e
+            raise Error, "invalid MORPHING recovery evidence: #{e.message}"
+        end
 
         def capture_final_delta!(state)
             metadata = @source.inspect(@vm_name, require_state: 'Off')
