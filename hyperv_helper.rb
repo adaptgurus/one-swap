@@ -548,7 +548,11 @@ module OneSwapHyperV
                 bus = controller == 'IDE' ? 'ide' : 'scsi'
                 prefix = bus == 'ide' ? 'hd' : 'sd'
                 suffix = disk_suffix(index)
-                driver_type = File.extname(path).downcase == '.vhd' ? 'vpc' : 'vhdx'
+                driver_type = case File.extname(path).downcase
+                              when '.vhd' then 'vpc'
+                              when '.raw' then 'raw'
+                              else 'vhdx'
+                              end
                 <<~XML
                     <disk type='file' device='disk'>
                       <driver name='qemu' type='#{driver_type}'/>
