@@ -39,6 +39,8 @@ module OneSwapHyperV
             env = {}
             libguestfs = @options[:libguestfs_path].to_s.strip
             env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
+            libguestfs_memsize = @options[:libguestfs_memsize].to_i
+            env['LIBGUESTFS_MEMSIZE'] = libguestfs_memsize.to_s if libguestfs_memsize.positive?
             if @options[:guest_os].to_s.casecmp('windows').zero?
                 env['VIRTIO_WIN'] = @options[:resolved_virtio_win] || resolve_virtio_win!
             end
