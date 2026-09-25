@@ -684,4 +684,17 @@ class OneSwapHelper
         @hyperv_source_host = OneSwapHyperV::ConnectionProfile.from_options(options).host
         OneSwapHyperV::HotCoordinator.new(self, options).recover_morphing_no_write
     end
+
+    def hyperv_hot_recover_morphing_post_oom_clone(vm_name, options)
+        options = options.merge(:name => vm_name, :format => 'raw')
+        @options = options
+        @options[:name] = vm_name
+        @options[:context] ||= '/usr/share/one/context'
+        @options[:virt_tools] ||= '/usr/local/share/virt-tools'
+        @options[:img_wait] ||= 120
+        @options[:context_min_free] ||= 1024
+        @options[:context_timeout] ||= 600
+        @hyperv_source_host = OneSwapHyperV::ConnectionProfile.from_options(options).host
+        OneSwapHyperV::HotCoordinator.new(self, options).recover_morphing_post_oom_clone
+    end
 end
