@@ -90,6 +90,7 @@ parser = OptionParser.new do |opts|
     opts.on('--v2v-in-place-path PATH', String) { |v| options[:v2v_in_place_path] = v }
     opts.on('--libguestfs-path PATH', String) { |v| options[:libguestfs_path] = v }
     opts.on('--libguestfs-memsize-mb MB', Integer, 'Explicit libguestfs appliance memory for conversion/recovery') { |v| options[:libguestfs_memsize_mb] = v }
+    opts.on('--libguestfs-smp N', Integer, 'Explicit libguestfs conversion vCPU count; independent of target --vcpu') { |v| options[:libguestfs_smp] = v }
     opts.on('--root ROOT', String) { |v| options[:root] = v }
     opts.on('--virtio PATH', String, 'trusted virtio-win ISO/directory used for Windows KVM driver injection') { |v| options[:virtio_path] = v }
     opts.on('--win-qemu-ga PATH', String) { |v| options[:qemu_ga_win] = v }
@@ -135,6 +136,9 @@ begin
     raise OptionParser::InvalidArgument, '--memory-mb must be greater than zero' if options[:memory_mb] && options[:memory_mb].to_i <= 0
     if options[:libguestfs_memsize_mb] && !options[:libguestfs_memsize_mb].to_i.between?(512, 8192)
         raise OptionParser::InvalidArgument, '--libguestfs-memsize-mb must be between 512 and 8192'
+    end
+    if options[:libguestfs_smp] && !options[:libguestfs_smp].to_i.between?(1, 8)
+        raise OptionParser::InvalidArgument, '--libguestfs-smp must be between 1 and 8'
     end
 
     config_file = options[:config_file]
