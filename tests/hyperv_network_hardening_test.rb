@@ -96,4 +96,66 @@ class HyperVNetworkHardeningTest < Minitest::Test
     two = coordinator(:guest_network_profile => profile).send(:normalized_guest_network_profile)
     assert_equal one, two
   end
+  def test_final_network_morph_preserves_resource_timeout_and_network_controls
+    c = coordinator(
+      :resolved_virtio_win => '/tmp/virtio-win',
+      :libguestfs_path => '/tmp/libguestfs-appliance',
+      :libguestfs_memsize_mb => 4096,
+      :libguestfs_smp => 2,
+      :hyperv_transfer_timeout => 321,
+      :v2v_in_place_path => '/usr/bin/virt-v2v-in-place'
+    )
+    c.define_singleton_method(:positive_timeout) { |_key| 321 }
+    c.define_singleton_method(:v2v_supports_option?) { |_binary, option| option == '--smp' }
+
+    env, argv, timeout = c.send(:final_network_v2v_command, '/tmp/final-libvirt.xml')
+
+    assert_equal '/tmp/libguestfs-appliance', env['LIBGUESTFS_PATH']
+    assert_equal '4096', env['LIBGUESTFS_MEMSIZE']
+    assert_equal '/tmp/virtio-win', env['VIRTIO_WIN']
+    assert_equal 321, timeout
+    assert_equal '/usr/bin/virt-v2v-in-place', argv.first
+    assert_includes argv.each_cons(2).to_a, ['--smp', '2']
+    assert_includes argv.each_cons(2).to_a, ['-i', 'libvirtxml']
+    assert_includes argv.each_cons(2).to_a, ['--root', 'first']
+    assert_includes argv.each_cons(2).to_a, [
+      '--mac',
+      "#{MAC}:ip:10.10.10.20,10.10.10.1,24,10.10.10.53,10.10.10.54"
+    ]
+  end
+
+  def test_final_network_morph_rejects_invalid_libguestfs_resources
+    c = coordinator(:libguestfs_memsize_mb => 256)
+    c.define_singleton_method(:positive_timeout) { |_key| 60 }
+    assert_raises(OneSwapHyperV::Error) do
+      c.send(:final_network_v2v_command, '/tmp/final-libvirt.xml')
+    end
+
+    c = coordinator(:libguestfs_smp => 9)
+    c.define_singleton_method(:positive_timeout) { |_key| 60 }
+    assert_raises(OneSwapHyperV::Error) do
+      c.send(:final_network_v2v_command, '/tmp/final-libvirt.xml')
+    end
+  end
+
+  def test_final_network_morph_falls_back_to_default_smp_one_on_legacy_v2v
+    c = coordinator(:guest_os => 'linux', :libguestfs_smp => 1)
+    c.define_singleton_method(:positive_timeout) { |_key| 60 }
+    c.define_singleton_method(:v2v_supports_option?) { |_binary, _option| false }
+
+    _env, argv, _timeout = c.send(:final_network_v2v_command, '/tmp/final-libvirt.xml')
+    refute_includes argv, '--smp'
+  end
+
+  def test_final_network_morph_rejects_smp_gt_one_on_legacy_v2v
+    c = coordinator(:guest_os => 'linux', :libguestfs_smp => 2)
+    c.define_singleton_method(:positive_timeout) { |_key| 60 }
+    c.define_singleton_method(:v2v_supports_option?) { |_binary, _option| false }
+
+    error = assert_raises(OneSwapHyperV::Error) do
+      c.send(:final_network_v2v_command, '/tmp/final-libvirt.xml')
+    end
+    assert_match(/does not support --smp/, error.message)
+  end
+
 end
