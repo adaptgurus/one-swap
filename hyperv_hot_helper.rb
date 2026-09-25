@@ -1014,7 +1014,25 @@ namespace LayerSentry {
                 env['LIBGUESTFS_MEMSIZE'] = memsize.to_s
                 warn "ONESWAP_HOT_LIBGUESTFS_MEMSIZE_MB=#{memsize}"
             end
+            smp = @options[:libguestfs_smp].to_i
+            if smp.positive?
+                raise Error, 'libguestfs SMP must be between 1 and 8' unless smp.between?(1, 8)
+                warn "ONESWAP_HOT_LIBGUESTFS_SMP=#{smp}"
+            end
             binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
+            argv = [
+                binary,
+                '-v',
+                '--machine-readable'
+            ]
+            argv.concat(['--smp', smp.to_s]) if smp.positive?
+            argv.concat([
+                '-i',
+                'libvirtxml',
+                xml,
+                '--root',
+                (@options[:root] || 'first').to_s
+            ])
             v2v_timeout = positive_timeout(:hyperv_transfer_timeout) || 7200
             stdout = +''
             stderr = +''
@@ -1023,14 +1041,7 @@ namespace LayerSentry {
 
             Open3.popen3(
                 env,
-                binary,
-                '-v',
-                '--machine-readable',
-                '-i',
-                'libvirtxml',
-                xml,
-                '--root',
-                (@options[:root] || 'first').to_s,
+                *argv,
                 :pgroup => true
             ) do |stdin, out, err, wait_thr|
                 stdin.close
