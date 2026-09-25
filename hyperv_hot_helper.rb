@@ -1008,6 +1008,12 @@ namespace LayerSentry {
             env = {}
             libguestfs = @options[:libguestfs_path].to_s.strip
             env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
+            memsize = @options[:libguestfs_memsize_mb].to_i
+            if memsize.positive?
+                raise Error, 'libguestfs memory must be between 512 and 8192 MB' unless memsize.between?(512, 8192)
+                env['LIBGUESTFS_MEMSIZE'] = memsize.to_s
+                warn "ONESWAP_HOT_LIBGUESTFS_MEMSIZE_MB=#{memsize}"
+            end
             binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
             v2v_timeout = positive_timeout(:hyperv_transfer_timeout) || 7200
             stdout = +''
