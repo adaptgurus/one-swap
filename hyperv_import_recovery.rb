@@ -101,6 +101,49 @@ module OneSwapHyperV
             state
         end
 
+        def recover_morphing_no_write_retry
+            validate_local_prerequisites!
+            state = HotUtil.load_state(@state_path)
+            raise Error, 'Hyper-V hot migration state is missing' unless state
+            validate_state_identity!(state)
+            raise Error, "no-write MORPHING retry requires phase MORPHING; found #{state['phase'].inspect}" unless state['phase'].to_s == 'MORPHING'
+            raise Error, 'no-write MORPHING retry requires evidence of the prior prelaunch recovery attempt' unless state['morph_prelaunch_recovery_started_at']
+            raise Error, 'prior MORPHING recovery already completed; no-write retry is invalid' if state['morph_prelaunch_recovery_completed_at']
+            raise Error, 'no-write MORPHING retry was already attempted; automatic replay is prohibited' if state['morph_no_write_retry_started_at']
+
+            evidence = @options[:recovery_evidence].to_s.strip
+            unless evidence.match?(/\A[A-Za-z0-9_.:-]{8,200}\z/)
+                raise Error, 'no-write MORPHING retry requires a durable operator evidence identifier'
+            end
+            memsize = @options[:libguestfs_memsize].to_i
+            unless memsize.between?(512, 16_384)
+                raise Error, 'no-write MORPHING retry requires --libguestfs-memsize between 512 and 16384 MB'
+            end
+
+            verify_source_off_for_import!(state)
+            verify_morphing_delta_application!(state)
+
+            xml = File.join(@dir, 'final-libvirt.xml')
+            raise Error, 'no-write MORPHING retry requires retained non-empty final-libvirt.xml from the failed libguestfs launch' unless File.file?(xml) && File.size(xml).positive?
+            xml_text = File.read(xml)
+            expected_disks = Array(state['disks']).length
+            raw_driver_count = xml_text.scan(/<driver name='qemu' type='raw'\/>/).length
+            raise Error, "retained final-libvirt.xml has #{raw_driver_count} RAW drivers; expected #{expected_disks}" unless raw_driver_count == expected_disks
+
+            state['morph_no_write_retry_started_at'] = Time.now.utc.iso8601
+            state['morph_no_write_retry_evidence'] = evidence
+            state['morph_no_write_retry_libguestfs_memsize_mb'] = memsize
+            HotUtil.write_json_atomic(@state_path, state)
+
+            rerun_v2v_in_place!(state)
+
+            state['phase'] = 'DELTA_APPLIED'
+            state['delta_applied_at'] ||= Time.now.utc.iso8601
+            state['morph_no_write_retry_completed_at'] = Time.now.utc.iso8601
+            HotUtil.write_json_atomic(@state_path, state)
+            state
+        end
+
         private
 
         def verify_morphing_delta_application!(state)
@@ -506,5 +549,21 @@ class OneSwapHelper
         @options[:context_timeout] ||= 600
         @hyperv_source_host = OneSwapHyperV::ConnectionProfile.from_options(options).host
         OneSwapHyperV::HotCoordinator.new(self, options).recover_morphing_prelaunch
+    end
+end
+
+
+class OneSwapHelper
+    def hyperv_hot_recover_morphing_no_write_retry(vm_name, options)
+        options = options.merge(:name => vm_name, :format => 'raw')
+        @options = options
+        @options[:name] = vm_name
+        @options[:context] ||= '/usr/share/one/context'
+        @options[:virt_tools] ||= '/usr/local/share/virt-tools'
+        @options[:img_wait] ||= 120
+        @options[:context_min_free] ||= 1024
+        @options[:context_timeout] ||= 600
+        @hyperv_source_host = OneSwapHyperV::ConnectionProfile.from_options(options).host
+        OneSwapHyperV::HotCoordinator.new(self, options).recover_morphing_no_write_retry
     end
 end
