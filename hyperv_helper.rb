@@ -14,6 +14,7 @@ require 'rexml/document'
 require 'securerandom'
 require 'shellwords'
 require 'timeout'
+require 'tempfile'
 
 module OneSwapHyperV
     class Error < StandardError; end
@@ -130,8 +131,14 @@ module OneSwapHyperV
         end
 
         def powershell(script, timeout: 120)
-            argv, stdin_data = powershell_invocation(script)
-            stdout, stderr, status = run_capture(argv, timeout, stdin_data)
+            encoded = Util.powershell_encoded(script)
+            stdout, stderr, status =
+                if encoded.bytesize <= POWERSHELL_ENCODED_COMMAND_MAX_BYTES
+                    argv, stdin_data = powershell_invocation(script)
+                    run_capture(argv, timeout, stdin_data)
+                else
+                    run_remote_script_capture(script, timeout)
+                end
             unless status.success?
                 detail = stderr.to_s.strip
                 detail = stdout.to_s.strip if detail.empty?
@@ -226,8 +233,68 @@ module OneSwapHyperV
             raise Error, "Hyper-V SSH/PowerShell operation timed out after #{timeout}s"
         end
 
-        def powershell_invocation(script)
-            common = [
+        def run_remote_script_capture(script, timeout)
+            remote_name = ".layersentry-#{SecureRandom.hex(12)}.ps1"
+            remote_target = "#{@profile.destination}:#{remote_name}"
+            Tempfile.create(['layersentry-hyperv-', '.ps1']) do |file|
+                file.binmode
+                file.write("\xEF\xBB\xBF".b)
+                file.write(script.encode(Encoding::UTF_8))
+                file.flush
+                file.fsync
+
+                scp_argv = [
+                    'scp', '-q',
+                    '-o', 'BatchMode=yes',
+                    '-o', 'IdentitiesOnly=yes',
+                    '-o', 'StrictHostKeyChecking=yes',
+                    '-o', "UserKnownHostsFile=#{@profile.known_hosts}",
+                    '-o', 'PasswordAuthentication=no',
+                    '-o', 'ServerAliveInterval=15',
+                    '-o', 'ServerAliveCountMax=4',
+                    '-o', 'TCPKeepAlive=yes',
+                    '-P', @profile.port.to_s,
+                    '-i', @profile.identity_file,
+                    file.path,
+                    remote_target
+                ]
+                _scp_out, scp_err, scp_status = run_capture(
+                    scp_argv,
+                    timeout && timeout.to_i.positive? ? [timeout.to_i, 120].min : 120
+                )
+                unless scp_status.success?
+                    raise Error, "Hyper-V PowerShell script upload failed (exit #{scp_status.exitstatus}): #{scp_err.to_s.strip}"
+                end
+
+                bootstrap = <<~POWERSHELL
+                    $ErrorActionPreference = 'Stop'
+                    $path = Join-Path $HOME '#{remote_name}'
+                    try {
+                        & $path
+                    } finally {
+                        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                    }
+                POWERSHELL
+                argv = powershell_common + ['-EncodedCommand', Util.powershell_encoded(bootstrap)]
+                begin
+                    run_capture(argv, timeout)
+                ensure
+                    cleanup = <<~POWERSHELL
+                        $path = Join-Path $HOME '#{remote_name}'
+                        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                    POWERSHELL
+                    cleanup_argv = powershell_common + ['-EncodedCommand', Util.powershell_encoded(cleanup)]
+                    begin
+                        run_capture(cleanup_argv, 30)
+                    rescue Error
+                        nil
+                    end
+                end
+            end
+        end
+
+        def powershell_common
+            [
                 'ssh', '-T',
                 '-o', 'BatchMode=yes',
                 '-o', 'IdentitiesOnly=yes',
@@ -243,17 +310,14 @@ module OneSwapHyperV
                 'powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive',
                 '-ExecutionPolicy', 'Bypass'
             ]
+        end
+
+        def powershell_invocation(script)
+            common = powershell_common
             encoded = Util.powershell_encoded(script)
-            if encoded.bytesize <= POWERSHELL_ENCODED_COMMAND_MAX_BYTES
-                [common + ['-EncodedCommand', encoded], nil]
-            else
-                # Windows PowerShell 5.1 natively supports reading command text
-                # from redirected stdin with "-Command -". Avoid a custom
-                # ReadToEnd/ScriptBlock bootstrap here: Windows OpenSSH versions
-                # have exhibited broken-pipe behavior with that nested stdin
-                # pattern on large multi-line payloads.
-                [common + ['-Command', '-'], script.encode(Encoding::UTF_8)]
-            end
+            raise Error, 'oversized PowerShell payload requires remote-file transport' if encoded.bytesize > POWERSHELL_ENCODED_COMMAND_MAX_BYTES
+
+            [common + ['-EncodedCommand', encoded], nil]
         end
     end
 
