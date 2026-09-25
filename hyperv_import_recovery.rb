@@ -137,10 +137,13 @@ module OneSwapHyperV
 
             memsize = @options[:libguestfs_memsize_mb].to_i
             raise Error, 'MORPHING no-write recovery requires explicit libguestfs memory between 512 and 8192 MB' unless memsize.between?(512, 8192)
+            smp = @options[:libguestfs_smp].to_i
+            raise Error, 'MORPHING no-write recovery requires explicit libguestfs SMP between 1 and 8' unless smp.between?(1, 8)
 
             state['morph_no_write_recovery_started_at'] = Time.now.utc.iso8601
             state['morph_no_write_recovery_reason'] = 'verified_no_prepared_disk_write_after_failed_prelaunch_v2v'
             state['morph_no_write_recovery_memsize_mb'] = memsize
+            state['morph_no_write_recovery_smp'] = smp
             HotUtil.write_json_atomic(@state_path, state)
 
             rerun_v2v_in_place!(state)
