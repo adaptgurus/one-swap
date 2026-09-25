@@ -159,6 +159,112 @@ module OneSwapHyperV
             raise Error, "invalid MORPHING no-write recovery timestamp: #{e.message}"
         end
 
+        # One final audited recovery after a no-write MORPHING retry failed
+        # because the recovery appliance could not provide enough resources to
+        # libguestfs. The already delta-applied prepared disks are never
+        # modified by this recovery. Conversion runs on same-filesystem reflink
+        # clones; the durable state is repointed to those clones only after
+        # virt-v2v-in-place succeeds.
+        def recover_morphing_post_oom_clone
+            validate_local_prerequisites!
+            state = HotUtil.load_state(@state_path)
+            raise Error, 'Hyper-V hot migration state is missing' unless state
+            validate_state_identity!(state)
+            unless state['phase'].to_s == 'MORPHING'
+                raise Error, "MORPHING post-OOM clone recovery requires phase MORPHING; found #{state['phase'].inspect}"
+            end
+
+            first_started = state['morph_prelaunch_recovery_started_at'].to_s.strip
+            no_write_started = state['morph_no_write_recovery_started_at'].to_s.strip
+            raise Error, 'post-OOM clone recovery requires prior prelaunch recovery start evidence' if first_started.empty?
+            raise Error, 'post-OOM clone recovery requires prior no-write recovery start evidence' if no_write_started.empty?
+            raise Error, 'post-OOM clone recovery is unnecessary because prelaunch recovery completed' if state['morph_prelaunch_recovery_completed_at']
+            raise Error, 'post-OOM clone recovery is unnecessary because no-write recovery completed' if state['morph_no_write_recovery_completed_at']
+            unless state['morph_prelaunch_recovery_reason'].to_s == 'validated_zero_length_xml_before_virt_v2v_launch'
+                raise Error, 'post-OOM clone recovery found an unqualified prelaunch recovery reason'
+            end
+            unless state['morph_no_write_recovery_reason'].to_s == 'verified_no_prepared_disk_write_after_failed_prelaunch_v2v'
+                raise Error, 'post-OOM clone recovery found an unqualified no-write recovery reason'
+            end
+            if state['morph_post_oom_clone_recovery_started_at']
+                raise Error, 'post-OOM clone recovery was already attempted; automatic replay is prohibited'
+            end
+            if state['delta_applied_at'] || state['import_started_at'] || state['template_id'] ||
+               state['imported_at'] || Array(state['image_imports']).any?
+                raise Error, 'post-OOM clone recovery found later-phase import evidence'
+            end
+
+            verify_source_off_for_import!(state)
+            verify_morphing_delta_application!(state)
+
+            no_write_started_at = Time.iso8601(no_write_started)
+            raw_paths = Array(state['disks']).map { |disk| disk['prepared_raw_path'].to_s }
+            raise Error, 'post-OOM clone recovery found no prepared disks' if raw_paths.empty?
+            raw_paths.each_with_index do |path, index|
+                raise Error, "prepared RAW disk #{index} is missing" unless File.file?(path)
+                expected = Integer(state['disks'].fetch(index).fetch('virtual_size'))
+                raise Error, "prepared RAW disk #{index} size changed" unless File.size(path) == expected
+                unless File.mtime(path) < no_write_started_at
+                    raise Error, "prepared RAW disk #{index} changed at or after the failed no-write recovery; clone recovery is unsafe"
+                end
+            end
+
+            memsize = @options[:libguestfs_memsize_mb].to_i
+            raise Error, 'post-OOM clone recovery requires explicit libguestfs memory between 512 and 8192 MB' unless memsize.between?(512, 8192)
+            smp = @options[:libguestfs_smp].to_i
+            raise Error, 'post-OOM clone recovery requires explicit libguestfs SMP between 1 and 8' unless smp.between?(1, 8)
+
+            clone_dir = File.join(@dir, 'post-oom-clones')
+            FileUtils.mkdir_p(clone_dir, mode: 0o700)
+            clone_paths = raw_paths.each_with_index.map do |path, index|
+                clone = File.join(clone_dir, format('prepared-%02d-post-oom.raw', index))
+                FileUtils.rm_f(clone)
+                stdout, stderr, status = Open3.capture3(
+                    'cp', '--reflink=always', '--sparse=always', '--preserve=mode,timestamps',
+                    path, clone
+                )
+                $stdout.write(stdout) unless stdout.empty?
+                $stderr.write(stderr) unless stderr.empty?
+                unless status.success?
+                    FileUtils.rm_f(clone)
+                    raise Error, "unable to create reflink recovery clone for prepared disk #{index}"
+                end
+                expected = Integer(state['disks'].fetch(index).fetch('virtual_size'))
+                unless File.file?(clone) && File.size(clone) == expected
+                    FileUtils.rm_f(clone)
+                    raise Error, "post-OOM recovery clone #{index} size mismatch"
+                end
+                clone
+            end
+
+            state['morph_post_oom_clone_recovery_started_at'] = Time.now.utc.iso8601
+            state['morph_post_oom_clone_recovery_reason'] = 'verified_prior_retries_no_prepared_disk_write_run_v2v_on_reflink_clones'
+            state['morph_post_oom_clone_recovery_memsize_mb'] = memsize
+            state['morph_post_oom_clone_recovery_smp'] = smp
+            state['morph_post_oom_original_prepared_paths'] = raw_paths
+            state['morph_post_oom_clone_paths'] = clone_paths
+            HotUtil.write_json_atomic(@state_path, state)
+
+            clone_state = JSON.parse(JSON.generate(state))
+            clone_state['disks'].each_with_index do |disk, index|
+                disk['prepared_raw_path'] = clone_paths.fetch(index)
+            end
+            rerun_v2v_in_place!(clone_state)
+
+            completed_at = Time.now.utc.iso8601
+            state['disks'].each_with_index do |disk, index|
+                disk['prepared_raw_path'] = clone_paths.fetch(index)
+            end
+            state['phase'] = 'DELTA_APPLIED'
+            state['delta_applied_at'] ||= completed_at
+            state['morph_post_oom_clone_v2v_completed_at'] = completed_at
+            state['morph_post_oom_clone_recovery_completed_at'] = completed_at
+            HotUtil.write_json_atomic(@state_path, state)
+            state
+        rescue ArgumentError => e
+            raise Error, "invalid MORPHING post-OOM clone recovery evidence: #{e.message}"
+        end
+
         private
 
         def verify_morphing_delta_application!(state)
