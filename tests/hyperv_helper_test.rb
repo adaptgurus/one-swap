@@ -66,16 +66,21 @@ class HyperVSSHTransportCommandLengthTest < Minitest::Test
     assert_nil stdin_data
   end
 
-  def test_large_powershell_uses_native_stdin_command_transport
+  def test_large_powershell_requires_remote_file_transport
     script = "$x='a'\n" + ("Write-Output $x\n" * 2_000)
-    argv, stdin_data = transport.send(:powershell_invocation, script)
-    assert_includes argv, '-Command'
-    assert_equal '-', argv.last
-    refute_includes argv, '-EncodedCommand'
-    assert_equal script, stdin_data
+    error = assert_raises(OneSwapHyperV::Error) do
+      transport.send(:powershell_invocation, script)
+    end
+    assert_includes error.message, 'remote-file transport'
     assert_operator OneSwapHyperV::Util.powershell_encoded(script).bytesize,
                     :>,
                     OneSwapHyperV::SSHTransport::POWERSHELL_ENCODED_COMMAND_MAX_BYTES
+
+    helper = File.read(File.expand_path('../hyperv_helper.rb', __dir__))
+    assert_includes helper, 'run_remote_script_capture'
+    assert_includes helper, "'scp', '-q'"
+    assert_includes helper, "Join-Path $HOME"
+    refute_includes helper, "['-Command', '-']"
   end
 end
 
