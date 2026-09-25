@@ -222,12 +222,12 @@ module OneSwapHyperV
             if encoded.bytesize <= POWERSHELL_ENCODED_COMMAND_MAX_BYTES
                 [common + ['-EncodedCommand', encoded], nil]
             else
-                bootstrap = <<~POWERSHELL
-                    $ErrorActionPreference = 'Stop'
-                    $payload = [Console]::In.ReadToEnd()
-                    & ([ScriptBlock]::Create($payload))
-                POWERSHELL
-                [common + ['-EncodedCommand', Util.powershell_encoded(bootstrap)], script.encode(Encoding::UTF_8)]
+                # Windows PowerShell 5.1 natively supports reading command text
+                # from redirected stdin with "-Command -". Avoid a custom
+                # ReadToEnd/ScriptBlock bootstrap here: Windows OpenSSH versions
+                # have exhibited broken-pipe behavior with that nested stdin
+                # pattern on large multi-line payloads.
+                [common + ['-Command', '-'], script.encode(Encoding::UTF_8)]
             end
         end
     end
