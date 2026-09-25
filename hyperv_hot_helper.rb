@@ -340,11 +340,15 @@ module OneSwapHyperV
         def create_delta_bundles!(state, local_dir, timeout: nil)
             FileUtils.mkdir_p(local_dir, mode: 0o700)
             state.fetch('disks').each_with_index.map do |disk, index|
+                warn "ONESWAP_HOT_STAGE=delta-generate disk=#{index}"
                 remote = create_remote_delta_bundle!(state, disk, index)
+                warn "ONESWAP_HOT_DELTA_READY disk=#{index} bytes=#{remote.fetch('FileSize')} ranges=#{remote.fetch('RangeCount')}"
                 local = File.join(local_dir, format('delta-%02d.lshv', index))
+                warn "ONESWAP_HOT_STAGE=delta-transfer disk=#{index}"
                 @transport.stream_file(remote.fetch('Path'), local, timeout: timeout)
                 raise Error, "delta bundle #{index} size mismatch" unless File.size(local) == Integer(remote.fetch('FileSize'))
                 raise Error, "delta bundle #{index} SHA-256 mismatch" unless Digest::SHA256.file(local).hexdigest == remote.fetch('SHA256').to_s.downcase
+                warn "ONESWAP_HOT_DELTA_TRANSFERRED disk=#{index} bytes=#{File.size(local)}"
                 local
             end
         end
@@ -876,18 +880,23 @@ namespace LayerSentry {
 
                 # After this durable barrier, prepared RAW disks may be mutated.
                 # A crash in MORPHING must never be replayed automatically.
+                warn 'ONESWAP_HOT_STAGE=morphing'
                 state['phase'] = 'MORPHING'
                 state['morphing_started_at'] ||= Time.now.utc.iso8601
                 HotUtil.write_json_atomic(@state_path, state)
 
                 state['disks'].each_with_index do |disk, index|
+                    warn "ONESWAP_HOT_STAGE=delta-apply disk=#{index}"
                     DeltaApplier.apply!(
                         bundles[index],
                         disk['prepared_raw_path'],
                         Integer(disk['virtual_size'])
                     )
+                    warn "ONESWAP_HOT_DELTA_APPLIED disk=#{index}"
                 end
+                warn 'ONESWAP_HOT_STAGE=virt-v2v-in-place'
                 rerun_v2v_in_place!(state)
+                warn 'ONESWAP_HOT_V2V_IN_PLACE=PASS'
                 state['phase'] = 'DELTA_APPLIED'
                 state['delta_applied_at'] = Time.now.utc.iso8601
                 HotUtil.write_json_atomic(@state_path, state)
@@ -900,9 +909,11 @@ namespace LayerSentry {
                 state['importing_started_at'] ||= Time.now.utc.iso8601
                 HotUtil.write_json_atomic(@state_path, state)
 
+                warn 'ONESWAP_HOT_STAGE=opennebula-image-import'
                 images = @helper.create_one_images(
                     state['disks'].map { |disk| disk['prepared_raw_path'] }
                 )
+                warn "ONESWAP_HOT_IMAGES_IMPORTED count=#{images.length}"
                 template = @helper.hyperv_vm_template(state['metadata'], images)
                 rc = template.allocate(template.to_xml)
                 if OpenNebula.is_error?(rc)
@@ -917,6 +928,7 @@ namespace LayerSentry {
                     )
                 end
                 state['template_id'] = template.id.to_i
+                warn "ONESWAP_HOT_TEMPLATE_IMPORTED id=#{state['template_id']}"
                 state['phase'] = 'IMPORTED'
                 state['imported_at'] = Time.now.utc.iso8601
                 HotUtil.write_json_atomic(@state_path, state)
