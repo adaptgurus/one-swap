@@ -190,4 +190,15 @@ class HyperVHotHelperTest < Minitest::Test
     assert_includes source, 'PhysicalDrive'
   end
 
+  def test_v2v_in_place_is_bounded_and_terminates_the_process_group
+    source = File.read(File.expand_path('../hyperv_hot_helper.rb', __dir__))
+    assert_includes source, "v2v_timeout = positive_timeout(:hyperv_transfer_timeout) || 7200"
+    assert_includes source, 'Open3.popen3('
+    assert_includes source, ':pgroup => true'
+    assert_includes source, "Timeout.timeout(v2v_timeout)"
+    assert_includes source, "Process.kill('TERM', -wait_thr.pid)"
+    assert_includes source, "Process.kill('KILL', -wait_thr.pid)"
+    assert_includes source, 'virt-v2v-in-place timed out after'
+  end
+
 end
