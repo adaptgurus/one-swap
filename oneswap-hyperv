@@ -45,6 +45,7 @@ parser = OptionParser.new do |opts|
     opts.on('--preflight', 'Validate hot migration without creating a reference point') { options[:preflight] = true }
     opts.on('--prepare', 'Create/export RCT reference point and build prepared RAW target disks') { options[:prepare] = true }
     opts.on('--commit', 'Revalidate, gracefully stop source VM, apply final RCT delta and import target') { options[:commit] = true }
+    opts.on('--recover-morphing-prelaunch', 'Recover a proven prelaunch MORPHING failure without replaying the final RCT delta') { options[:recover_morphing_prelaunch] = true }
     opts.on('--verify-source-off', 'Verify the same Hyper-V source remains Off immediately before OpenNebula materialization') { options[:verify_source_off] = true }
     opts.on('--cleanup', 'Remove prepared RCT/staging state before cutover') { options[:cleanup] = true }
     opts.on('--finalize-success', 'Cleanup RCT/staging after LayerSentry independently validates target success') { options[:finalize_success] = true }
@@ -160,7 +161,7 @@ begin
 
     helper = OneSwapHelper.new
     if options[:inventory]
-        conflicting = %i[hot preflight prepare commit verify_source_off cleanup finalize_success].select { |name| options[name] }
+        conflicting = %i[hot preflight prepare commit recover_morphing_prelaunch verify_source_off cleanup finalize_success].select { |name| options[name] }
         raise "--inventory cannot be combined with #{conflicting.map { |name| "--#{name.to_s.tr('_', '-')}" }.join(', ')}" unless conflicting.empty?
         result = helper.hyperv_inventory(vm_name, options)
         puts JSON.generate(result.merge('source_platform' => 'hyperv', 'source_vm_name' => vm_name))
@@ -170,21 +171,22 @@ begin
     helper.instance_variable_set(:@client, OpenNebula::Client.new)
 
     if options[:hot]
-        phases = %i[preflight prepare commit verify_source_off cleanup finalize_success].select { |name| options[name] }
-        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --verify-source-off, --cleanup or --finalize-success' unless phases.length == 1
+        phases = %i[preflight prepare commit recover_morphing_prelaunch verify_source_off cleanup finalize_success].select { |name| options[name] }
+        raise 'hot migration requires exactly one of --preflight, --prepare, --commit, --recover-morphing-prelaunch, --verify-source-off, --cleanup or --finalize-success' unless phases.length == 1
         raise 'hot migration requires --operation-id' if options[:operation_id].to_s.strip.empty?
         result = case phases.first
                  when :preflight then helper.hyperv_hot_preflight(vm_name, options)
                  when :prepare then helper.hyperv_hot_prepare(vm_name, options)
                  when :commit then helper.hyperv_hot_commit(vm_name, options)
+                 when :recover_morphing_prelaunch then helper.hyperv_hot_recover_morphing_prelaunch(vm_name, options)
                  when :verify_source_off then helper.hyperv_hot_verify_source_off(vm_name, options)
                  when :cleanup then helper.hyperv_hot_cleanup(vm_name, options)
                  when :finalize_success then helper.hyperv_hot_finalize_success(vm_name, options)
                  end
         puts JSON.generate(result.merge('source_platform' => 'hyperv', 'vm_name' => vm_name))
     else
-        if %i[preflight prepare commit verify_source_off cleanup finalize_success].any? { |name| options[name] }
-            raise '--preflight/--prepare/--commit/--verify-source-off/--cleanup/--finalize-success require --hot'
+        if %i[preflight prepare commit recover_morphing_prelaunch verify_source_off cleanup finalize_success].any? { |name| options[name] }
+            raise '--preflight/--prepare/--commit/--recover-morphing-prelaunch/--verify-source-off/--cleanup/--finalize-success require --hot'
         end
         template_id = helper.hyperv_convert(vm_name, options)
         puts JSON.generate({ :status => 'imported', :source_platform => 'hyperv', :vm_name => vm_name, :template_id => template_id })
