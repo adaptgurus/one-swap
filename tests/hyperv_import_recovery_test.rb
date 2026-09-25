@@ -40,6 +40,36 @@ class HyperVImportRecoveryTest < Minitest::Test
     end
   end
 
+  def test_post_oom_clone_recovery_requires_prior_no_write_attempt
+    Dir.mktmpdir do |dir|
+      state_path = File.join(dir, 'state.json')
+      OneSwapHyperV::HotUtil.write_json_atomic(state_path, {
+        'operation_id' => 'op-1',
+        'vm_name' => 'vm-1',
+        'phase' => 'MORPHING',
+        'morph_prelaunch_recovery_started_at' => Time.now.utc.iso8601,
+        'morph_prelaunch_recovery_reason' => 'validated_zero_length_xml_before_virt_v2v_launch'
+      })
+      coordinator = OneSwapHyperV::HotCoordinator.allocate
+      coordinator.instance_variable_set(:@state_path, state_path)
+      coordinator.instance_variable_set(:@operation_id, 'op-1')
+      coordinator.instance_variable_set(:@vm_name, 'vm-1')
+      coordinator.define_singleton_method(:validate_local_prerequisites!) { true }
+      coordinator.define_singleton_method(:validate_state_identity!) { |_state| true }
+
+      error = assert_raises(OneSwapHyperV::Error) do
+        coordinator.recover_morphing_post_oom_clone
+      end
+      assert_match(/prior no-write recovery start evidence/, error.message)
+    end
+  end
+
+  def test_cli_exposes_post_oom_clone_recovery
+    cli = File.read(File.expand_path('../oneswap-hyperv', __dir__))
+    assert_includes cli, '--recover-morphing-post-oom-clone'
+    assert_includes cli, 'hyperv_hot_recover_morphing_post_oom_clone'
+  end
+
   def test_hot_image_name_is_operation_scoped_and_disk_scoped
     first = OneSwapHyperV::HotCoordinator.allocate
     first.instance_variable_set(:@vm_name, 'Web VM 01')
