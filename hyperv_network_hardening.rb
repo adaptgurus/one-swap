@@ -157,7 +157,9 @@ module OneSwapHyperV
         end
 
         # This remains the single post-RCT guest morph. Network arguments are
-        # appended to the same invocation that injects VirtIO drivers.
+        # appended to the same invocation that injects VirtIO drivers. Keep all
+        # resource/timeout controls from the core hot helper here because this
+        # file is the final rerun_v2v_in_place! override in the load chain.
         def rerun_v2v_in_place!(state)
             xml = File.join(@dir, 'final-libvirt.xml')
             raw_paths = state['disks'].map { |disk| disk['prepared_raw_path'] }
@@ -165,25 +167,111 @@ module OneSwapHyperV
                 file.write(final_raw_libvirt_xml(state, raw_paths))
             end
 
-            env = {}
-            libguestfs = @options[:libguestfs_path].to_s.strip
-            env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
-            if @options[:guest_os].to_s.casecmp('windows').zero?
-                env['VIRTIO_WIN'] = @options[:resolved_virtio_win] || resolve_virtio_win!
+            env, argv, v2v_timeout = final_network_v2v_command(xml)
+            stdout = +''
+            stderr = +''
+            status = nil
+            timed_out = false
+
+            Open3.popen3(env, *argv, :pgroup => true) do |stdin, out, err, wait_thr|
+                stdin.close
+                out_thread = Thread.new { out.read.to_s }
+                err_thread = Thread.new { err.read.to_s }
+
+                begin
+                    Timeout.timeout(v2v_timeout) { status = wait_thr.value }
+                rescue Timeout::Error
+                    timed_out = true
+                    begin
+                        Process.kill('TERM', -wait_thr.pid)
+                    rescue Errno::ESRCH, Errno::EPERM
+                        nil
+                    end
+
+                    begin
+                        Timeout.timeout(30) { status = wait_thr.value }
+                    rescue Timeout::Error
+                        begin
+                            Process.kill('KILL', -wait_thr.pid)
+                        rescue Errno::ESRCH, Errno::EPERM
+                            nil
+                        end
+                        status = wait_thr.value
+                    end
+                ensure
+                    stdout = out_thread.value
+                    stderr = err_thread.value
+                end
             end
-            binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
-            argv = [binary, '-v', '--machine-readable', '-i', 'libvirtxml', xml,
-                    '--root', (@options[:root] || 'first').to_s]
-            windows_static_ip_args.each do |value|
-                argv << '--mac' << value
-            end
-            stdout, stderr, status = Open3.capture3(env, *argv)
+
             $stdout.write(stdout) unless stdout.empty?
             $stderr.write(stderr) unless stderr.empty?
-            raise Error, 'virt-v2v-in-place failed after source shutdown; prepared target disks are UNKNOWN and source must remain OFF' unless status.success?
+
+            if timed_out
+                raise Error,
+                      "virt-v2v-in-place timed out after #{v2v_timeout}s after source shutdown; " \
+                      'prepared target disks are now UNKNOWN and source must remain OFF'
+            end
+
+            raise Error,
+                  'virt-v2v-in-place failed after source shutdown; prepared target disks are UNKNOWN and source must remain OFF' unless status&.success?
         end
 
         private
+
+        def final_network_v2v_command(xml)
+            env = {}
+            libguestfs = @options[:libguestfs_path].to_s.strip
+            env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
+
+            memsize = @options[:libguestfs_memsize_mb].to_i
+            if memsize.positive?
+                raise Error, 'libguestfs memory must be between 512 and 8192 MB' unless memsize.between?(512, 8192)
+                env['LIBGUESTFS_MEMSIZE'] = memsize.to_s
+                warn "ONESWAP_HOT_LIBGUESTFS_MEMSIZE_MB=#{memsize}"
+            end
+
+            smp = @options[:libguestfs_smp].to_i
+            if smp.positive?
+                raise Error, 'libguestfs SMP must be between 1 and 8' unless smp.between?(1, 8)
+                warn "ONESWAP_HOT_LIBGUESTFS_SMP=#{smp}"
+            end
+
+            if @options[:guest_os].to_s.casecmp('windows').zero?
+                env['VIRTIO_WIN'] = @options[:resolved_virtio_win] || resolve_virtio_win!
+            end
+
+            binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
+            argv = [binary, '-v', '--machine-readable']
+            if smp.positive?
+                if v2v_supports_option?(binary, '--smp')
+                    argv.concat(['--smp', smp.to_s])
+                elsif smp == 1
+                    warn 'ONESWAP_HOT_LIBGUESTFS_SMP_DEFAULT=1 (--smp unsupported by installed virt-v2v)'
+                else
+                    raise Error,
+                          "installed virt-v2v does not support --smp; requested libguestfs SMP #{smp}. " \
+                          'Use SMP=1 or upgrade virt-v2v before cutover/recovery'
+                end
+            end
+            argv.concat(['-i', 'libvirtxml', xml, '--root', (@options[:root] || 'first').to_s])
+            windows_static_ip_args.each do |value|
+                argv << '--mac' << value
+            end
+
+            [env, argv, positive_timeout(:hyperv_transfer_timeout) || 7200]
+        end
+
+        def v2v_supports_option?(binary, option)
+            @v2v_help_cache ||= {}
+            help = @v2v_help_cache[binary] ||= begin
+                stdout, stderr, = Open3.capture3(binary, '--help')
+                "#{stdout}\n#{stderr}"
+            end
+            help.match?(/(?:^|\s)#{Regexp.escape(option)}(?:[=\s]|$)/)
+        rescue StandardError
+            false
+        end
 
         def target_digest
             HotUtil.digest({
