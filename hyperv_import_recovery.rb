@@ -101,6 +101,61 @@ module OneSwapHyperV
             state
         end
 
+        def recover_morphing_no_write
+            validate_local_prerequisites!
+            state = HotUtil.load_state(@state_path)
+            raise Error, 'Hyper-V hot migration state is missing' unless state
+            validate_state_identity!(state)
+            raise Error, "MORPHING no-write recovery requires phase MORPHING; found #{state['phase'].inspect}" unless state['phase'].to_s == 'MORPHING'
+
+            first_started = state['morph_prelaunch_recovery_started_at'].to_s.strip
+            raise Error, 'MORPHING no-write recovery requires prior prelaunch recovery start evidence' if first_started.empty?
+            raise Error, 'MORPHING no-write recovery is unnecessary because prior recovery completed' if state['morph_prelaunch_recovery_completed_at']
+            raise Error, 'MORPHING no-write recovery reason is not the qualified prelaunch path' unless state['morph_prelaunch_recovery_reason'].to_s == 'validated_zero_length_xml_before_virt_v2v_launch'
+            raise Error, 'MORPHING no-write recovery was already attempted; automatic replay is prohibited' if state['morph_no_write_recovery_started_at']
+            if state['delta_applied_at'] || state['import_started_at'] || state['template_id'] || state['imported_at'] || Array(state['image_imports']).any?
+                raise Error, 'MORPHING no-write recovery found later-phase import evidence'
+            end
+
+            verify_source_off_for_import!(state)
+            verify_morphing_delta_application!(state)
+
+            started_at = Time.iso8601(first_started)
+            raw_paths = Array(state['disks']).map { |disk| disk['prepared_raw_path'].to_s }
+            raw_paths.each_with_index do |path, index|
+                raise Error, "prepared RAW disk #{index} is missing" unless File.file?(path)
+                raise Error, "prepared RAW disk #{index} changed at or after failed recovery start" unless File.mtime(path) < started_at
+            end
+
+            xml = File.join(@dir, 'final-libvirt.xml')
+            raise Error, 'MORPHING no-write recovery requires retained final-libvirt.xml' unless File.file?(xml) && File.size(xml).positive?
+            raise Error, 'final-libvirt.xml predates the failed recovery start' unless File.mtime(xml) >= started_at
+            expected_xml = Converter.new(@options.merge(:format => 'raw')).libvirt_xml(@vm_name, state['metadata'], raw_paths)
+            unless Digest::SHA256.hexdigest(File.binread(xml)) == Digest::SHA256.hexdigest(expected_xml)
+                raise Error, 'retained final-libvirt.xml does not match deterministic current conversion metadata'
+            end
+
+            memsize = @options[:libguestfs_memsize_mb].to_i
+            raise Error, 'MORPHING no-write recovery requires explicit libguestfs memory between 512 and 8192 MB' unless memsize.between?(512, 8192)
+
+            state['morph_no_write_recovery_started_at'] = Time.now.utc.iso8601
+            state['morph_no_write_recovery_reason'] = 'verified_no_prepared_disk_write_after_failed_prelaunch_v2v'
+            state['morph_no_write_recovery_memsize_mb'] = memsize
+            HotUtil.write_json_atomic(@state_path, state)
+
+            rerun_v2v_in_place!(state)
+
+            completed_at = Time.now.utc.iso8601
+            state['phase'] = 'DELTA_APPLIED'
+            state['delta_applied_at'] ||= completed_at
+            state['morph_prelaunch_recovery_completed_at'] ||= completed_at
+            state['morph_no_write_recovery_completed_at'] = completed_at
+            HotUtil.write_json_atomic(@state_path, state)
+            state
+        rescue ArgumentError => e
+            raise Error, "invalid MORPHING no-write recovery timestamp: #{e.message}"
+        end
+
         private
 
         def verify_morphing_delta_application!(state)
@@ -506,5 +561,18 @@ class OneSwapHelper
         @options[:context_timeout] ||= 600
         @hyperv_source_host = OneSwapHyperV::ConnectionProfile.from_options(options).host
         OneSwapHyperV::HotCoordinator.new(self, options).recover_morphing_prelaunch
+    end
+
+    def hyperv_hot_recover_morphing_no_write(vm_name, options)
+        options = options.merge(:name => vm_name, :format => 'raw')
+        @options = options
+        @options[:name] = vm_name
+        @options[:context] ||= '/usr/share/one/context'
+        @options[:virt_tools] ||= '/usr/local/share/virt-tools'
+        @options[:img_wait] ||= 120
+        @options[:context_min_free] ||= 1024
+        @options[:context_timeout] ||= 600
+        @hyperv_source_host = OneSwapHyperV::ConnectionProfile.from_options(options).host
+        OneSwapHyperV::HotCoordinator.new(self, options).recover_morphing_no_write
     end
 end
