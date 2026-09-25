@@ -188,16 +188,41 @@ module OneSwapHyperV
         private
 
         def run_capture(argv, timeout, stdin_data = nil)
-            result = nil
-            Timeout.timeout(timeout) do
-                result = if stdin_data
-                             Open3.capture3(*argv, stdin_data: stdin_data)
-                         else
-                             Open3.capture3(*argv)
-                         end
+            stdout_text = +''
+            stderr_text = +''
+            status = nil
+            pid = nil
+            runner = proc do
+                Open3.popen3(*argv) do |stdin, stdout, stderr, wait_thr|
+                    pid = wait_thr.pid
+                    writer = Thread.new do
+                        begin
+                            stdin.write(stdin_data) if stdin_data
+                        ensure
+                            stdin.close unless stdin.closed?
+                        end
+                    end
+                    out_reader = Thread.new { stdout.read.to_s }
+                    err_reader = Thread.new { stderr.read.to_s }
+                    writer.value
+                    stdout_text = out_reader.value
+                    stderr_text = err_reader.value
+                    status = wait_thr.value
+                end
             end
-            result
+
+            if timeout && timeout.to_i.positive?
+                Timeout.timeout(timeout.to_i, &runner)
+            else
+                runner.call
+            end
+            [stdout_text, stderr_text, status]
         rescue Timeout::Error
+            begin
+                Process.kill('TERM', pid) if pid
+            rescue Errno::ESRCH, Errno::EPERM
+                nil
+            end
             raise Error, "Hyper-V SSH/PowerShell operation timed out after #{timeout}s"
         end
 
