@@ -984,8 +984,78 @@ namespace LayerSentry {
         end
 
         def rerun_v2v_in_place!(state)
-            xml=File.join(@dir,'final-libvirt.xml'); raw_paths=state['disks'].map{|disk| disk['prepared_raw_path']}; File.open(xml,'w',0o600){|file| file.write(Converter.new(@options.merge(:format=>'raw')).libvirt_xml(@vm_name,state['metadata'],raw_paths))}
-            env={}; libguestfs=@options[:libguestfs_path].to_s.strip; env['LIBGUESTFS_PATH']=libguestfs unless libguestfs.empty?; binary=@options[:v2v_in_place_path]||'virt-v2v-in-place'; stdout,stderr,status=Open3.capture3(env,binary,'-v','--machine-readable','-i','libvirtxml',xml,'--root',(@options[:root]||'first').to_s); $stdout.write(stdout) unless stdout.empty?; $stderr.write(stderr) unless stderr.empty?; raise Error,'virt-v2v-in-place failed after source shutdown; prepared target disks are now UNKNOWN and source must remain OFF' unless status.success?
+            xml = File.join(@dir, 'final-libvirt.xml')
+            raw_paths = state['disks'].map { |disk| disk['prepared_raw_path'] }
+            File.open(xml, 'w', 0o600) do |file|
+                file.write(
+                    Converter.new(@options.merge(:format => 'raw'))
+                             .libvirt_xml(@vm_name, state['metadata'], raw_paths)
+                )
+            end
+
+            env = {}
+            libguestfs = @options[:libguestfs_path].to_s.strip
+            env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
+            binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
+            v2v_timeout = positive_timeout(:hyperv_transfer_timeout) || 7200
+            stdout = +''
+            stderr = +''
+            status = nil
+            timed_out = false
+
+            Open3.popen3(
+                env,
+                binary,
+                '-v',
+                '--machine-readable',
+                '-i',
+                'libvirtxml',
+                xml,
+                '--root',
+                (@options[:root] || 'first').to_s,
+                :pgroup => true
+            ) do |stdin, out, err, wait_thr|
+                stdin.close
+                out_thread = Thread.new { out.read.to_s }
+                err_thread = Thread.new { err.read.to_s }
+
+                begin
+                    Timeout.timeout(v2v_timeout) { status = wait_thr.value }
+                rescue Timeout::Error
+                    timed_out = true
+                    begin
+                        Process.kill('TERM', -wait_thr.pid)
+                    rescue Errno::ESRCH, Errno::EPERM
+                        nil
+                    end
+
+                    begin
+                        Timeout.timeout(30) { status = wait_thr.value }
+                    rescue Timeout::Error
+                        begin
+                            Process.kill('KILL', -wait_thr.pid)
+                        rescue Errno::ESRCH, Errno::EPERM
+                            nil
+                        end
+                        status = wait_thr.value
+                    end
+                ensure
+                    stdout = out_thread.value
+                    stderr = err_thread.value
+                end
+            end
+
+            $stdout.write(stdout) unless stdout.empty?
+            $stderr.write(stderr) unless stderr.empty?
+
+            if timed_out
+                raise Error,
+                      "virt-v2v-in-place timed out after #{v2v_timeout}s after source shutdown; " \
+                      'prepared target disks are now UNKNOWN and source must remain OFF'
+            end
+
+            raise Error,
+                  'virt-v2v-in-place failed after source shutdown; prepared target disks are now UNKNOWN and source must remain OFF' unless status&.success?
         end
 
         def local_free_bytes(path); stdout,_stderr,status=Open3.capture3('df','-Pk',path); return nil unless status.success?; fields=stdout.lines.last.to_s.split; return nil if fields.length<4; Integer(fields[3])*1024 rescue nil; end
