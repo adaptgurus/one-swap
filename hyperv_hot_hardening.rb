@@ -441,6 +441,8 @@ namespace LayerSentry {
             env = {}
             libguestfs = @options[:libguestfs_path].to_s.strip
             env['LIBGUESTFS_PATH'] = libguestfs unless libguestfs.empty?
+            libguestfs_memsize = @options[:libguestfs_memsize].to_i
+            env['LIBGUESTFS_MEMSIZE'] = libguestfs_memsize.to_s if libguestfs_memsize.positive?
             binary = @options[:v2v_in_place_path] || 'virt-v2v-in-place'
             stdout, stderr, status = Open3.capture3(
                 env, binary, '-v', '--machine-readable', '-i', 'libvirtxml', xml,
