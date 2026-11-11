@@ -32,7 +32,7 @@
 #    identity_file: '/etc/one/oneswap/hyperv/hv-prod.key'
 #    known_hosts: '/etc/one/oneswap/hyperv/known_hosts'
 #    staging_dir: 'D:\\LayerSentryMigration'
-#    shutdown_timeout: 300                # Graceful Stop-VM -Shutdown timeout; no forced turnoff fallback
+#    shutdown_timeout: 300                # Graceful Stop-VM without -TurnOff/-Save timeout; no forced turnoff fallback
 #    transfer_timeout: 7200               # Baseline/final delta SSH transfer timeout
 #    prepare_timeout: 7200                # RCT reference-point create/export timeout
 #    delta_timeout: 7200                  # Final GetVirtualDiskChanges/delta generation timeout
