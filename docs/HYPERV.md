@@ -85,7 +85,7 @@ Any drift blocks cutover and leaves the source running.
 
 ## Final shutdown policy
 
-`--commit` uses `Stop-VM without -TurnOff/-Save` and waits for state `Off`. The source does **not** fall back to `-TurnOff`. If graceful shutdown does not complete within the configured timeout, cutover fails without an automatic hard power-off.
+`--commit` uses `Stop-VM` without `-TurnOff` or `-Save` and waits for state `Off`. The source does **not** fall back to `-TurnOff`. If graceful shutdown does not complete within the configured timeout, cutover fails without an automatic hard power-off.
 
 After `CUTOVER_STARTED`/`SOURCE_OFF`, OneSwap will never automatically restart the Hyper-V source. A failure after this boundary must be reconciled explicitly to avoid dual running or data divergence.
 
