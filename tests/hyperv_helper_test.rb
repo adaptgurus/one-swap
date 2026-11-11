@@ -37,4 +37,19 @@ class HyperVHelperTest < Minitest::Test
     assert_includes xml, "type='vhdx'"
     assert_includes xml, 'vm&lt;&amp;'
   end
+
+  def test_libvirt_xml_honors_raw_prepared_disk_format_after_rct_delta
+    converter = OneSwapHyperV::Converter.new({})
+    xml = converter.libvirt_xml('warm-guest', eligible, ['/tmp/prepared-00.raw'])
+    assert_includes xml, "type='raw'"
+    refute_includes xml, "type='vhdx'"
+    assert_includes xml, "<target dev='sda' bus='scsi'/>"
+  end
+
+  def test_libvirt_xml_rejects_unrecognized_disk_format_instead_of_guessing_vhdx
+    converter = OneSwapHyperV::Converter.new({})
+    assert_raises(OneSwapHyperV::Error) {
+      converter.libvirt_xml('warm-guest', eligible, ['/tmp/prepared-00.weird'])
+    }
+  end
 end
