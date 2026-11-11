@@ -100,3 +100,46 @@ class HyperVHotHelperTest < Minitest::Test
   end
 
 end
+
+
+# Windows Server 2025 and the LayerSentry lab exposed two release blockers:
+# - Stop-VM does not support -Shutdown;
+# - successful log-based reference points have no RCT IDs.
+class HyperVHotSourceRuntimeSafetyTest < Minitest::Test
+  class PowershellCapture
+    attr_reader :script, :timeout
+
+    def powershell_json(script, timeout:)
+      @script, @timeout = script, timeout
+      { 'State' => 'Off', 'AlreadyOff' => false }
+    end
+  end
+
+  def test_graceful_shutdown_uses_supported_stop_vm_and_never_forces_poweroff
+    transport = PowershellCapture.new
+    source = OneSwapHyperV::HotSource.allocate
+    source.instance_variable_set(:@transport, transport)
+    source.power_off!('disposable-test-guest', timeout: 31)
+    assert_includes transport.script, 'Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop'
+    refute_match(/^\s*Stop-VM[^\n]*(?:-Shutdown|-TurnOff|-Save|-Force)/, transport.script)
+    assert_operator transport.timeout, :>=, 31
+    assert_includes transport.script, 'graceful Hyper-V shutdown timed out'
+  end
+
+  def test_reference_creation_requests_rct_not_replica_log
+    source = OneSwapHyperV::HotSource.allocate
+    script = source.send(:reference_prepare_script, 'bmFtZQ==', 'c3RhZ2U=', 'b3A=', 1)
+    assert_includes script, 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]2)'
+    refute_includes script, 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)'
+  end
+
+  def test_reference_validation_rejects_wrong_type_wrong_consistency_and_empty_rct_ids
+    source = OneSwapHyperV::HotSource.allocate
+    script = source.send(:reference_prepare_script, 'bmFtZQ==', 'c3RhZ2U=', 'b3A=', 1)
+    assert_includes script, 'ReferencePointType -ne 2'
+    assert_includes script, 'ConsistencyLevel -ne 1'
+    assert_includes script, 'HasAssociatedData'
+    assert_includes script, 'ResilientChangeTrackingIdentifiers'
+    assert_includes script, 'blank or invalid RCT tracking identifier'
+  end
+end
