@@ -409,9 +409,11 @@ module OneSwapHyperV
                 $settingClass=Get-WmiObject -Namespace $ns -List | Where-Object {$_.Name -eq 'Msvm_VirtualSystemReferencePointSettingData'}
                 if ($null -eq $settingClass) { throw 'Msvm_VirtualSystemReferencePointSettingData unavailable' }
                 $setting=$settingClass.CreateInstance(); $setting.ConsistencyLevel=[byte]#{consistency.to_i}
-                # ReferencePointType=2 requests RCT; type=1 is log-based and
-                # does not produce the RCT identifiers required for delta copy.
-                $created=$svc.CreateReferencePoint($cs,$setting.GetText(1),[uint16]2)
+                # WMI method input value 1 requests RCT (0 requests replica-log).
+                # The resulting reference point uses a DIFFERENT enum:
+                # ReferencePointType=2 is RCT and type=1 is log-based.
+                # Confirm the result type and real RCT IDs before accepting it.
+                $created=$svc.CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)
                 if ($created.ReturnValue -eq 4096) { Wait-WmiJob $created.Job | Out-Null }
                 elseif ($created.ReturnValue -ne 0) { throw "CreateReferencePoint failed code=$($created.ReturnValue)" }
                 $refs=@(Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | Where-Object {$before -notcontains $_.InstanceID})
