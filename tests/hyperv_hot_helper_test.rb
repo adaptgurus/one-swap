@@ -129,8 +129,8 @@ class HyperVHotSourceRuntimeSafetyTest < Minitest::Test
   def test_reference_creation_requests_rct_not_replica_log
     source = OneSwapHyperV::HotSource.allocate
     script = source.send(:reference_prepare_script, 'bmFtZQ==', 'c3RhZ2U=', 'b3A=', 1)
-    assert_includes script, 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]2)'
-    refute_includes script, 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)'
+    assert_includes script, 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)'
+    refute_includes script, 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]0)'
   end
 
   def test_reference_validation_rejects_wrong_type_wrong_consistency_and_empty_rct_ids
