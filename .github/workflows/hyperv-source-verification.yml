@@ -82,8 +82,13 @@ jobs:
           grep -q "GetVirtualDiskChanges" hyperv_hot_helper.rb
           grep -q "CreateReferencePoint" hyperv_hot_helper.rb
           grep -q "ExportReferencePoint" hyperv_hot_helper.rb
-          grep -q "Stop-VM -VM \$vm -Shutdown" hyperv_hot_helper.rb
+          grep -q "Stop-VM -VM \$vm -Confirm:\$false -ErrorAction Stop" hyperv_hot_helper.rb
+          ! grep -q "Stop-VM -VM \$vm -Shutdown" hyperv_hot_helper.rb
           ! grep -q "Stop-VM -VM \$vm -TurnOff" hyperv_hot_helper.rb
+          grep -Fq 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]2)' hyperv_hot_helper.rb
+          ! grep -Fq 'CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)' hyperv_hot_helper.rb
+          grep -Fq 'ReferencePointType -ne 2' hyperv_hot_helper.rb
+          grep -Fq 'ConsistencyLevel -ne 1' hyperv_hot_helper.rb
           grep -q "qemu-img baseline conversion failed" hyperv_hot_hardening.rb
           grep -q "type='raw'" hyperv_hot_hardening.rb
           grep -q "AllowedVlanIdList" hyperv_hot_hardening.rb
