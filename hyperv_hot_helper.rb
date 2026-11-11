@@ -312,7 +312,9 @@ module OneSwapHyperV
                 $vm=Get-VM -Name $name -ErrorAction Stop
                 if ([string]$vm.State -eq 'Off') { [pscustomobject]@{State='Off';AlreadyOff=$true}|ConvertTo-Json -Compress; exit 0 }
                 if ([string]$vm.State -ne 'Running') { throw "source VM must be Running immediately before cutover; state=$($vm.State)" }
-                Stop-VM -VM $vm -Shutdown -ErrorAction Stop
+                # Stop-VM without -TurnOff/-Save requests graceful guest shutdown.
+                # Windows Server 2025 does not implement the -Shutdown switch.
+                Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop
                 $deadline=(Get-Date).AddSeconds(#{timeout.to_i})
                 do {
                     Start-Sleep -Seconds 2
@@ -407,13 +409,22 @@ module OneSwapHyperV
                 $settingClass=Get-WmiObject -Namespace $ns -List | Where-Object {$_.Name -eq 'Msvm_VirtualSystemReferencePointSettingData'}
                 if ($null -eq $settingClass) { throw 'Msvm_VirtualSystemReferencePointSettingData unavailable' }
                 $setting=$settingClass.CreateInstance(); $setting.ConsistencyLevel=[byte]#{consistency.to_i}
-                $created=$svc.CreateReferencePoint($cs,$setting.GetText(1),[uint16]1)
+                # ReferencePointType=2 requests RCT; type=1 is log-based and
+                # does not produce the RCT identifiers required for delta copy.
+                $created=$svc.CreateReferencePoint($cs,$setting.GetText(1),[uint16]2)
                 if ($created.ReturnValue -eq 4096) { Wait-WmiJob $created.Job | Out-Null }
                 elseif ($created.ReturnValue -ne 0) { throw "CreateReferencePoint failed code=$($created.ReturnValue)" }
                 $refs=@(Get-WmiObject -Namespace $ns -Class Msvm_VirtualSystemReferencePoint -Filter "VirtualSystemIdentifier='$($vm.VMId.Guid)'" | Where-Object {$before -notcontains $_.InstanceID})
                 if ($refs.Count -ne 1) { throw "expected exactly one new RCT reference point; found $($refs.Count)" }
                 $ref=$refs[0]
+                if ([int]$ref.ReferencePointType -ne 2) { throw "Hyper-V returned reference type $($ref.ReferencePointType), not RCT type 2" }
+                if ([int]$ref.ConsistencyLevel -ne 1) { throw "Hyper-V returned consistency $($ref.ConsistencyLevel), not application-consistent level 1" }
+                if ([bool]$ref.HasAssociatedData) { throw 'Hyper-V RCT reference unexpectedly includes log-based associated data' }
+                if ($null -eq $ref.ResilientChangeTrackingIdentifiers) { throw 'Hyper-V returned no RCT change-tracking identifiers' }
                 if ($ref.VirtualDiskIdentifiers.Count -ne $ref.ResilientChangeTrackingIdentifiers.Count) { throw 'RCT reference point disk/id arrays differ in size' }
+                foreach ($rctId in $ref.ResilientChangeTrackingIdentifiers) {
+                    if ([string]::IsNullOrWhiteSpace([string]$rctId) -or -not ([string]$rctId -match '^rct')) { throw 'Hyper-V returned blank or invalid RCT tracking identifier' }
+                }
                 $rct=@()
                 for ($i=0;$i -lt $ref.VirtualDiskIdentifiers.Count;$i++) {
                     $path=Resolve-DiskPath ([string]$ref.VirtualDiskIdentifiers[$i]) $sourceDisks
