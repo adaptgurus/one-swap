@@ -19,7 +19,7 @@ non-mutating preflight
   -> qemu-img VHDX -> RAW (layout-preserving baseline mirror)
   -> AWAITING_CUTOVER
   -> fresh pre-cutover validation
-  -> graceful Stop-VM -Shutdown
+  -> graceful Stop-VM without -TurnOff/-Save
   -> wait for source Off
   -> GetVirtualDiskChanges using prepared RCT IDs
   -> read changed guest byte ranges from read-only mounted source VHDX
@@ -85,7 +85,7 @@ Any drift blocks cutover and leaves the source running.
 
 ## Final shutdown policy
 
-`--commit` uses `Stop-VM -Shutdown` and waits for state `Off`. The source does **not** fall back to `-TurnOff`. If graceful shutdown does not complete within the configured timeout, cutover fails without an automatic hard power-off.
+`--commit` uses `Stop-VM without -TurnOff/-Save` and waits for state `Off`. The source does **not** fall back to `-TurnOff`. If graceful shutdown does not complete within the configured timeout, cutover fails without an automatic hard power-off.
 
 After `CUTOVER_STARTED`/`SOURCE_OFF`, OneSwap will never automatically restart the Hyper-V source. A failure after this boundary must be reconciled explicitly to avoid dual running or data divergence.
 
@@ -182,3 +182,8 @@ The source code intentionally blocks checkpoint-chain migration, shielded/vTPM m
 A crash in `IMPORTING` is deliberately not auto-replayed yet because one or more OpenNebula Images may already exist. The ambiguity barrier prevents duplicate allocation/data corruption, but automated partial-Image adoption remains a live-qualification/integration item.
 
 Production certification still requires real Hyper-V/OpenNebula testing for Generation 1/2, Windows/Linux boot, VirtIO, multi-disk/NIC, Secure Boot, large VHDX, RCT correctness, synchronous/asynchronous RCT behavior on the qualified Windows builds, interrupted prepare/commit, controller restart, source shutdown failure, partial OpenNebula import recovery, target data integrity and no-dual-running proof.
+
+
+## Warm-migration release gate (Windows Server 2025)
+
+`CreateReferencePoint` must request `ReferencePointType=2` (RCT-based) and its resulting reference must have `ConsistencyLevel=1` (application-consistent), a non-empty per-disk `rctX:` identifier, and no unexpected log data. A successful WMI job alone is not sufficient: log-based points can report success but cannot provide RCT deltas. A recovery snapshot converted to type 2 with consistency level 2 is **crash-consistent only** and cannot satisfy the production gate. If the host does not support type-2 application-consistent creation or RCT export, do not advance to cutover. Preserve the source and reconcile the reference before retrying.
