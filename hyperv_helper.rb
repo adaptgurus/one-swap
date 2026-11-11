@@ -437,7 +437,14 @@ module OneSwapHyperV
                 bus = controller == 'IDE' ? 'ide' : 'scsi'
                 prefix = bus == 'ide' ? 'hd' : 'sd'
                 suffix = disk_suffix(index)
-                driver_type = File.extname(path).downcase == '.vhd' ? 'vpc' : 'vhdx'
+                driver_type = case File.extname(path).downcase
+                              when '.vhd' then 'vpc'
+                              when '.vhdx' then 'vhdx'
+                              when '.raw', '.img' then 'raw'
+                              when '.qcow2' then 'qcow2'
+                              else
+                                  raise Error, "unsupported Hyper-V conversion input disk format #{File.extname(path).inspect}"
+                              end
                 <<~XML
                     <disk type='file' device='disk'>
                       <driver name='qemu' type='#{driver_type}'/>
