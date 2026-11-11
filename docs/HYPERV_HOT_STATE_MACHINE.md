@@ -12,7 +12,7 @@ The source VM is still running. An application-consistent Hyper-V RCT reference 
 
 ### CUTOVER_STARTED
 
-Fresh pre-cutover checks passed. The operation has crossed the deliberate source-mutation boundary and is about to issue `Stop-VM without -TurnOff/-Save`. Generic cleanup is forbidden from this point onward.
+Fresh pre-cutover checks passed. The operation has crossed the deliberate source-mutation boundary and is about to issue `Stop-VM` without `-TurnOff` or `-Save`. Generic cleanup is forbidden from this point onward.
 
 ### SOURCE_OFF
 
